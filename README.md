@@ -2,7 +2,6 @@
 
 Hệ thống giám sát không tiếp xúc bằng tín hiệu Wi-Fi (CSI): phát hiện người di chuyển, đo nhịp thở và nhận diện té ngã, không cần camera hay thiết bị đeo. Bài tập lớn môn Lập trình mạng.
 
-> Đây là khung dự án, chưa có mã nguồn. Kế hoạch đầy đủ nằm ở tài liệu "WiSense — Kế hoạch dự án".
 
 ## Kiến trúc
 
