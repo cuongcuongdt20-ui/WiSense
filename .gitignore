@@ -1,0 +1,19 @@
+# Java / Maven
+target/
+*.class
+*.log
+
+# ESP-IDF
+firmware/*/build/
+firmware/*/managed_components/
+firmware/*/sdkconfig.old
+firmware/*/dependencies.lock
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+nbproject/private/
