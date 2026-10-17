@@ -5,9 +5,12 @@ import vn.wisense.common.model.CsiFrame;
 import vn.wisense.common.model.Event;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MotionDetectorTest {
 
@@ -40,6 +43,44 @@ class MotionDetectorTest {
         w.add(new float[]{18, 0});
         w.add(new float[]{22, 0});
         assertEquals(4.0, MotionDetector.meanVariance(w), 1e-9);   // cột 0 giá trị 0 không kéo trung bình xuống
+    }
+
+    /** Khung có mọi sóng mang con bằng cùng một giá trị v. */
+    private static CsiFrame frameAmp(int sensor, long i, float v) {
+        float[] a = new float[64];
+        Arrays.fill(a, v);
+        return new CsiFrame(sensor, i, i * 10_000L, -50, a, new float[64]);
+    }
+
+    private static boolean moving(Event e) { return (Boolean) e.fields().get("moving"); }
+
+    @Test
+    void flatRoomIsNotMoving() {
+        MotionDetector d = new MotionDetector();
+        for (long i = 0; i < 100; i++) d.onFrame(frameAmp(1, i, 20f));
+        Event e = d.poll().get(0);
+        assertEquals(0.0, e.num("level"), 1e-9);
+        assertFalse(moving(e));
+    }
+
+    @Test
+    void shakingSignalIsMoving() {
+        MotionDetector d = new MotionDetector();
+        for (long i = 0; i < 100; i++) d.onFrame(frameAmp(1, i, i % 2 == 0 ? 18f : 22f));
+        Event e = d.poll().get(0);
+        assertEquals(1.0, e.num("level"), 1e-9);     // phương sai 4 >> 2*0.5 nên level bị chặn ở 1
+        assertTrue(moving(e));
+    }
+
+    @Test
+    void movingStopsWhenRoomGoesCalm() {
+        MotionDetector d = new MotionDetector();
+        for (long i = 0; i < 100; i++) d.onFrame(frameAmp(1, i, i % 2 == 0 ? 18f : 22f));
+        for (long i = 100; i < 200; i++) d.onFrame(frameAmp(1, i, 20f));
+        List<Event> evs = d.poll();
+        assertEquals(2, evs.size());
+        assertTrue(moving(evs.get(0)));
+        assertFalse(moving(evs.get(1)));
     }
 
     @Test
