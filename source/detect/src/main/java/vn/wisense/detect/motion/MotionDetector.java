@@ -23,6 +23,28 @@ public final class MotionDetector implements Detector {
         int count;
     }
 
+    /** Phương sai trung bình qua các sóng mang con. Mỗi phần tử của window là amplitude[] của một khung. */
+    static double meanVariance(List<float[]> window) {
+        int n = window.size();
+        int k = window.get(0).length;
+        double sumVar = 0;
+        int used = 0;
+        for (int c = 0; c < k; c++) {
+            double mean = 0;
+            for (float[] a : window) mean += a[c];
+            mean /= n;
+            if (mean < 1e-3) continue;              // sóng mang con null: bỏ
+            double var = 0;
+            for (float[] a : window) {
+                double d = a[c] - mean;
+                var += d * d;
+            }
+            sumVar += var / n;
+            used++;
+        }
+        return used == 0 ? 0 : sumVar / used;
+    }
+
     private final Config cfg;
     private final Map<Integer, S> sensors = new HashMap<>();
     private final List<Event> events = new ArrayList<>();
