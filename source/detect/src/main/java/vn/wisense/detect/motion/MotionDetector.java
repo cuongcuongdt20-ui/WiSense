@@ -10,26 +10,34 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Phát hiện có người / đang di chuyển bằng phương sai biên độ trong cửa sổ 1 giây (TV3). */
+/**
+ * Phát hiện có người / đang di chuyển (TV3).
+ * Đo độ lắc của biên độ trong cửa sổ 1 giây bằng CV² (phương sai chia bình phương trung bình),
+ * nên không phụ thuộc thang biên độ (AGC, vị trí đặt). Ngưỡng = k × mức nền học ở vài giây đầu.
+ */
 public final class MotionDetector implements Detector {
 
-    /** Mọi tham số gom một chỗ để chỉnh. */
     public record Config(
             int windowFrames,       // cửa sổ trượt, ~100 khung = 1 giây
-            double threshold,       // phương sai vượt mức này thì coi là chuyển động
-            double releaseFactor) { // tắt chuyển động khi phương sai < releaseFactor * threshold
+            int warmupWindows,      // số lần đánh giá đầu để học mức nền (5 giây), giả định phòng gần yên
+            double k,               // ngưỡng = k * mức nền
+            double minThreshold,    // sàn của ngưỡng (đơn vị CV²), phòng khi mức nền ≈ 0
+            double alpha,           // tốc độ nền thích nghi khi không có chuyển động
+            double releaseFactor) { // tắt chuyển động khi raw < releaseFactor * ngưỡng
 
-        public static Config defaults() { return new Config(100, 0.5, 0.7); }
+        public static Config defaults() { return new Config(100, 5, 4.0, 1e-4, 0.05, 0.7); }
     }
 
     /** Trạng thái riêng của từng cảm biến. */
     private static final class S {
         long lastSeq = -1, lastTs = -1;
         int count;
+        int len = -1;               // số sóng mang con của khung trước
+        int warm;                   // số lần đã học nền
+        double baseline;
         boolean moving;
         final ArrayDeque<float[]> window = new ArrayDeque<>();
     }
-
 
     private final Config cfg;
     private final Map<Integer, S> sensors = new HashMap<>();
@@ -49,24 +57,49 @@ public final class MotionDetector implements Detector {
         s.lastSeq = f.seq();
         s.lastTs = f.timestampUs();
 
+        // số sóng mang con đổi: các khung cũ không còn so sánh được, học lại từ đầu
+        int len = f.amplitude().length;
+        if (len != s.len) {
+            s.window.clear();
+            s.count = 0;
+            s.moving = false;
+            s.warm = 0;
+            s.baseline = 0;
+            s.len = len;
+        }
+
         // cửa sổ trượt: thêm khung mới, bỏ khung cũ nhất
         s.window.addLast(f.amplitude().clone());
         if (s.window.size() > cfg.windowFrames()) s.window.removeFirst();
 
-        // mỗi windowFrames khung (~1 giây) và khi cửa sổ đã đầy thì mới đánh giá
+        // mỗi windowFrames khung (~1 giây), khi cửa sổ đã đầy, mới đánh giá
         s.count++;
         if (s.count < cfg.windowFrames() || s.window.size() < cfg.windowFrames()) return;
         s.count = 0;
 
-        double raw = meanVariance(new ArrayList<>(s.window));
+        double raw = meanNormVariance(new ArrayList<>(s.window));
 
-        if (!s.moving && raw > cfg.threshold()) {
+        // học mức nền: lấy giây yên nhất, chịu được lúc đầu có người đi qua một phần
+        if (s.warm < cfg.warmupWindows()) {
+            s.baseline = s.warm == 0 ? raw : Math.min(s.baseline, raw);
+            s.warm++;
+            events.add(Event.motion(f.sensorId(), 0.0, false));
+            return;
+        }
+
+        double thr = Math.max(cfg.minThreshold(), cfg.k() * s.baseline);
+
+        if (!s.moving && raw > thr) {
             s.moving = true;
-        } else if (s.moving && raw < cfg.releaseFactor() * cfg.threshold()) {
+        } else if (s.moving && raw < cfg.releaseFactor() * thr) {
             s.moving = false;
         }
 
-        double level = Math.min(1.0, raw / (2 * cfg.threshold()));
+        // nền chỉ thích nghi khi yên, nên chuyển động không kéo nền lên
+        if (!s.moving) s.baseline += cfg.alpha() * (raw - s.baseline);
+
+        // thang log: raw = 10 × ngưỡng thì level = 1, biểu đồ không chỉ có 0 và 1
+        double level = Math.min(1.0, Math.log1p(raw / thr) / Math.log1p(10));
         events.add(Event.motion(f.sensorId(), level, s.moving));
     }
 
@@ -77,25 +110,35 @@ public final class MotionDetector implements Detector {
         return out;
     }
 
-    /** Phương sai trung bình qua các sóng mang con. Mỗi phần tử của window là amplitude[] của một khung. */
-    static double meanVariance(List<float[]> window) {
+    /**
+     * CV² trung bình qua các sóng mang con: mỗi sóng mang con tính phương sai / (trung bình)².
+     * Bỏ sóng mang con yếu (null hoặc dưới 10% mức trung bình chung).
+     */
+    static double meanNormVariance(List<float[]> window) {
         int n = window.size();
         int k = window.get(0).length;
-        double sumVar = 0;
+        double[] mean = new double[k];
+        double overall = 0;
+        for (int c = 0; c < k; c++) {
+            double m = 0;
+            for (float[] a : window) m += a[c];
+            mean[c] = m / n;
+            overall += mean[c];
+        }
+        overall /= k;
+
+        double sum = 0;
         int used = 0;
         for (int c = 0; c < k; c++) {
-            double mean = 0;
-            for (float[] a : window) mean += a[c];
-            mean /= n;
-            if (mean < 1e-3) continue;              // sóng mang con null: bỏ
+            if (mean[c] <= 1e-9 || mean[c] < 0.1 * overall) continue;
             double var = 0;
             for (float[] a : window) {
-                double d = a[c] - mean;
+                double d = a[c] - mean[c];
                 var += d * d;
             }
-            sumVar += var / n;
+            sum += (var / n) / (mean[c] * mean[c]);
             used++;
         }
-        return used == 0 ? 0 : sumVar / used;
+        return used == 0 ? 0 : sum / used;
     }
 }
