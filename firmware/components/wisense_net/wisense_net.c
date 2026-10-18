@@ -1,23 +1,37 @@
 #include <string.h>
 #include "esp_event.h"
+#include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 #include "lwip/netdb.h"
 #include "nvs_flash.h"
 #include "wisense_net.h"
 
 #define GOT_IP_BIT BIT0
+static const char *TAG = "wisense-net";
 static EventGroupHandle_t s_events;
+static uint8_t s_bssid[6];
+static uint8_t s_channel;
 
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *d = data;
+        ESP_LOGW(TAG, "mat ket noi Wi-Fi (ly do %d), noi lai", d->reason);
         xEventGroupClearBits(s_events, GOT_IP_BIT);
         esp_wifi_connect();                       // tự nối lại
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        wifi_ap_record_t ap;
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {   // router có thể đổi khi nối lại (mesh)
+            memcpy(s_bssid, ap.bssid, 6);
+            s_channel = ap.primary;
+        }
+        ip_event_got_ip_t *e = data;
+        ESP_LOGI(TAG, "co IP " IPSTR ", kenh router %u", IP2STR(&e->ip_info.ip), s_channel);
         xEventGroupSetBits(s_events, GOT_IP_BIT);
     }
 }
@@ -34,6 +48,7 @@ void ws_wifi_connect(const char *ssid, const char *pass) {
     esp_netif_create_default_wifi_sta();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));   // như esp-csi: không ghi cấu hình vào flash
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL);
 
@@ -47,6 +62,14 @@ void ws_wifi_connect(const char *ssid, const char *pass) {
     xEventGroupWaitBits(s_events, GOT_IP_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
 }
 
+const uint8_t *ws_wifi_bssid(void) {
+    return s_bssid;
+}
+
+uint8_t ws_wifi_channel(void) {
+    return s_channel;
+}
+
 int ws_udp_open(const char *host, uint16_t port, struct sockaddr_in *dest) {
     struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_DGRAM};
     struct addrinfo *res = NULL;
@@ -55,6 +78,15 @@ int ws_udp_open(const char *host, uint16_t port, struct sockaddr_in *dest) {
     dest->sin_port = htons(port);
     freeaddrinfo(res);
     return socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+}
+
+int ws_udp_open_retry(const char *host, uint16_t port, struct sockaddr_in *dest) {
+    for (;;) {
+        int sock = ws_udp_open(host, port, dest);
+        if (sock >= 0) return sock;
+        ESP_LOGW(TAG, "khong mo duoc UDP toi %s:%u, thu lai sau 1 giay", host, port);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
 
 // ESP32 là little-endian nên tự ghi từng byte theo big-endian

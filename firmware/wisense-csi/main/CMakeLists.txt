@@ -1,1 +1,2 @@
-idf_component_register(SRCS "app_main.c" INCLUDE_DIRS "." REQUIRES wisense_net esp_timer esp_wifi)
+idf_component_register(SRCS "app_main.c" INCLUDE_DIRS "."
+                       REQUIRES wisense_net esp_timer esp_wifi esp_netif lwip log)

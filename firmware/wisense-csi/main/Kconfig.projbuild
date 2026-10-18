@@ -13,5 +13,38 @@ menu "WiSense"
         default 5005
     config WS_SENSOR_ID
         int "Sensor id"
+        range 0 255
         default 1
+
+    choice WS_CSI_SOURCE
+        prompt "Nguon CSI"
+        default WS_SOURCE_ROUTER
+        help
+            ROUTER: 1 board, CSI tu goi tra loi ping cua router (csi_recv_router).
+            ESPNOW: 2 board, CSI tu goi ESP-NOW cua con phat chay csi_send (csi_recv).
+        config WS_SOURCE_ROUTER
+            bool "Router (1 board)"
+        config WS_SOURCE_ESPNOW
+            bool "ESP-NOW tu con phat csi_send (2 board)"
+    endchoice
+
+    config WS_PING_HZ
+        int "So lan ping gateway moi giay"
+        depends on WS_SOURCE_ROUTER
+        range 10 200
+        default 100
+
+    config WS_SENDER_MAC
+        string "MAC cua con phat"
+        depends on WS_SOURCE_ESPNOW
+        default "1a:00:00:00:00:00"
+        help
+            Lay dung gia tri CONFIG_CSI_SEND_MAC trong csi_send.
+
+    config WS_FORCE_GAIN
+        bool "Khoa cung do loi AGC sau khi hoc nen"
+        default n
+        help
+            Tat: bu do loi cho tung khung (mac dinh cua esp-csi).
+            Bat: khoa AGC o muc nen, bien do on dinh hon nhung de bao hoa khi nguoi dung sat anten.
 endmenu
