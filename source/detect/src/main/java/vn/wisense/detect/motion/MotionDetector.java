@@ -12,31 +12,37 @@ import java.util.Map;
 
 /**
  * Phát hiện có người / đang di chuyển (TV3).
- * Đo độ lắc của biên độ trong cửa sổ 1 giây bằng CV² (phương sai chia bình phương trung bình),
- * nên không phụ thuộc thang biên độ (AGC, vị trí đặt). Ngưỡng = k × mức nền học ở vài giây đầu.
+ * Đo độ lắc của biên độ trong cửa sổ 1 giây (theo timestampUs, không theo số khung) bằng CV²
+ * (phương sai chia bình phương trung bình), nên không phụ thuộc thang biên độ (AGC, vị trí đặt).
+ * Ngưỡng = k × mức nền học ở vài giây đầu.
  */
 public final class MotionDetector implements Detector {
 
     public record Config(
-            int windowFrames,       // cửa sổ trượt, ~100 khung = 1 giây
+            long windowUs,          // độ dài cửa sổ và khoảng cách giữa hai lần đánh giá (1 giây)
+            int minFrames,          // cửa sổ ít khung hơn mức này thì không đánh giá
             int warmupWindows,      // số lần đánh giá đầu để học mức nền (5 giây), giả định phòng gần yên
             double k,               // ngưỡng = k * mức nền
             double minThreshold,    // sàn của ngưỡng (đơn vị CV²), phòng khi mức nền ≈ 0
             double alpha,           // tốc độ nền thích nghi khi không có chuyển động
             double releaseFactor) { // tắt chuyển động khi raw < releaseFactor * ngưỡng
 
-        public static Config defaults() { return new Config(100, 5, 4.0, 1e-4, 0.05, 0.7); }
+        public static Config defaults() {
+            return new Config(1_000_000L, 10, 5, 4.0, 1e-4, 0.05, 0.7);
+        }
     }
+
+    private record Sample(long ts, float[] amp) {}
 
     /** Trạng thái riêng của từng cảm biến. */
     private static final class S {
         long lastSeq = -1, lastTs = -1;
-        int count;
+        long nextEvalUs;            // đủ mốc thời gian này mới đánh giá
         int len = -1;               // số sóng mang con của khung trước
         int warm;                   // số lần đã học nền
         double baseline;
         boolean moving;
-        final ArrayDeque<float[]> window = new ArrayDeque<>();
+        final ArrayDeque<Sample> window = new ArrayDeque<>();
     }
 
     private final Config cfg;
@@ -51,33 +57,37 @@ public final class MotionDetector implements Detector {
         if (f == null || f.amplitude() == null || f.amplitude().length == 0) return;
 
         S s = sensors.computeIfAbsent(f.sensorId(), id -> new S());
+        long ts = f.timestampUs();
 
         // bỏ gói trùng / sai thứ tự
-        if (s.lastSeq >= 0 && (f.seq() <= s.lastSeq || f.timestampUs() <= s.lastTs)) return;
+        if (s.lastSeq >= 0 && (f.seq() <= s.lastSeq || ts <= s.lastTs)) return;
         s.lastSeq = f.seq();
-        s.lastTs = f.timestampUs();
+        s.lastTs = ts;
 
         // số sóng mang con đổi: các khung cũ không còn so sánh được, học lại từ đầu
         int len = f.amplitude().length;
         if (len != s.len) {
             s.window.clear();
-            s.count = 0;
             s.moving = false;
             s.warm = 0;
             s.baseline = 0;
             s.len = len;
         }
 
-        // cửa sổ trượt: thêm khung mới, bỏ khung cũ nhất
-        s.window.addLast(f.amplitude().clone());
-        if (s.window.size() > cfg.windowFrames()) s.window.removeFirst();
+        // cửa sổ theo thời gian: thêm khung mới, bỏ các khung cũ hơn windowUs
+        s.window.addLast(new Sample(ts, f.amplitude().clone()));
+        while (ts - s.window.peekFirst().ts() > cfg.windowUs()) s.window.removeFirst();
 
-        // mỗi windowFrames khung (~1 giây), khi cửa sổ đã đầy, mới đánh giá
-        s.count++;
-        if (s.count < cfg.windowFrames() || s.window.size() < cfg.windowFrames()) return;
-        s.count = 0;
+        // cửa sổ vừa bắt đầu lại (khung đầu, đổi số sóng mang con, hoặc sau khoảng trống dài):
+        // phải đủ một cửa sổ mới đầy mới đánh giá
+        if (s.window.size() == 1) s.nextEvalUs = ts + cfg.windowUs();
 
-        double raw = meanNormVariance(new ArrayList<>(s.window));
+        if (ts < s.nextEvalUs || s.window.size() < cfg.minFrames()) return;
+        s.nextEvalUs = ts + cfg.windowUs();
+
+        List<float[]> frames = new ArrayList<>(s.window.size());
+        for (Sample x : s.window) frames.add(x.amp());
+        double raw = meanNormVariance(frames);
 
         // học mức nền: lấy giây yên nhất, chịu được lúc đầu có người đi qua một phần
         if (s.warm < cfg.warmupWindows()) {
