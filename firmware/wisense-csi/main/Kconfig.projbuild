@@ -1,0 +1,17 @@
+menu "WiSense"
+    config WS_WIFI_SSID
+        string "Wi-Fi SSID"
+        default "wisense"
+    config WS_WIFI_PASS
+        string "Wi-Fi password"
+        default ""
+    config WS_SERVER_HOST
+        string "Server IP"
+        default "192.168.1.10"
+    config WS_SERVER_PORT
+        int "Server UDP port"
+        default 5005
+    config WS_SENSOR_ID
+        int "Sensor id"
+        default 1
+endmenu

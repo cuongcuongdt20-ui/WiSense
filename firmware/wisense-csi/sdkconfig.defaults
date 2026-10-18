@@ -1,0 +1,2 @@
+# Bật thu CSI (mặc định tắt)
+CONFIG_ESP_WIFI_CSI_ENABLED=y
