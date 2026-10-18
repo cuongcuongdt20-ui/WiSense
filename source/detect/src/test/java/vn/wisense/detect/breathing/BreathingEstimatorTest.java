@@ -25,4 +25,20 @@ class BreathingEstimatorTest {
     void meanAmpIgnoresNullSubcarriers() {
         assertEquals(20.0, BreathingEstimator.meanAmp(new float[]{20f, 0f, 20f, 0f}), 1e-9);
     }
+
+    @Test
+    void peakBpmFinds15() {
+        double fs = 10.0;
+        double[] x = new double[600];                         // 60 giây
+        for (int i = 0; i < x.length; i++) x[i] = 20 + 0.5 * Math.sin(2 * Math.PI * 0.25 * i / fs);
+        assertEquals(15.0, BreathingEstimator.peakBpm(x, fs), 0.5);
+    }
+
+    @Test
+    void peakBpmFinds24() {
+        double fs = 10.0;
+        double[] x = new double[600];
+        for (int i = 0; i < x.length; i++) x[i] = 20 + 0.5 * Math.sin(2 * Math.PI * 0.4 * i / fs);
+        assertEquals(24.0, BreathingEstimator.peakBpm(x, fs), 0.5);
+    }
 }

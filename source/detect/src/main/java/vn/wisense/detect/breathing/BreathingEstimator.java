@@ -4,6 +4,8 @@ import vn.wisense.common.model.CsiFrame;
 import vn.wisense.common.model.Detector;
 import vn.wisense.common.model.Event;
 
+import org.jtransforms.fft.DoubleFFT_1D;
+
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -12,6 +14,10 @@ import java.util.Map;
 
 /** Ước lượng nhịp thở bằng FFT trên biên độ trung bình (TV3). Bản khung: mới có gom dữ liệu và resample. */
 public final class BreathingEstimator implements Detector {
+
+    private static final int N_FFT = 4096;
+    private static final double F_LO = 0.15;   // 9 nhịp/phút
+    private static final double F_HI = 0.5;    // 30 nhịp/phút
 
     public record Config(
             double windowSec,    // độ dài cửa sổ, 60 giây
@@ -89,5 +95,30 @@ public final class BreathingEstimator implements Detector {
             x[i] = pts[j][1] * (1 - w) + pts[j + 1][1] * w;
         }
         return x;
+    }
+
+    /** Nhịp/phút của đỉnh phổ mạnh nhất trong dải thở. x: tín hiệu đã resample ở fs Hz, tối đa N_FFT mẫu. */
+    static double peakBpm(double[] x, double fs) {
+        int n = x.length;
+        double mean = 0;
+        for (double v : x) mean += v;
+        mean /= n;
+
+        double[] a = new double[N_FFT];                       // zero-pad
+        for (int i = 0; i < n; i++) {
+            double hann = 0.5 * (1 - Math.cos(2 * Math.PI * i / (n - 1)));
+            a[i] = (x[i] - mean) * hann;
+        }
+        new DoubleFFT_1D(N_FFT).realForward(a);               // kết quả: a[2k] = phần thực, a[2k+1] = phần ảo của bin k
+
+        int kLo = (int) Math.ceil(F_LO * N_FFT / fs);
+        int kHi = (int) Math.floor(F_HI * N_FFT / fs);
+        int peak = kLo;
+        double best = -1;
+        for (int k = kLo; k <= kHi; k++) {
+            double p = a[2 * k] * a[2 * k] + a[2 * k + 1] * a[2 * k + 1];   // công suất bin k
+            if (p > best) { best = p; peak = k; }
+        }
+        return peak * fs / N_FFT * 60.0;                      // bin → Hz → nhịp/phút
     }
 }
