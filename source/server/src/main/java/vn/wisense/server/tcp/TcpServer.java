@@ -62,8 +62,7 @@ public final class TcpServer implements AutoCloseable {
 
     public void broadcastRaw(String json) {
         for (ClientSession client : clients) {
-            try { client.sendJson(json); }
-            catch (IOException e) { client.close(); }
+            client.enqueueJson(json);
         }
     }
 

@@ -35,6 +35,7 @@ public final class ServerMain {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             udpReceiver.close();
             tcpServer.close();
+            sensors.close();
         }, "wisense-shutdown"));
         tcpThread.start();
         try {
@@ -42,6 +43,7 @@ public final class ServerMain {
         } finally {
             udpReceiver.close();
             tcpServer.close();
+            sensors.close();
         }
     }
 

@@ -22,6 +22,17 @@ public final class PacketTracker {
             trim(nowNanos);
             return true;
         }
+        // ESP32 reboot commonly restarts seq near zero. Distinguish this from
+        // the normal uint32 wrap (which occurs only when lastSeq is near 2^32).
+        if (lastSeq > 1_000L && lastSeq < SEQ_MODULUS - 1_000L
+                && seq < 100L && seq < lastSeq) {
+            lastSeq = seq;
+            accepted++;
+            acceptedNanos.addLast(nowNanos);
+            trim(nowNanos);
+            return true;
+        }
+
         long delta = (seq - lastSeq + SEQ_MODULUS) % SEQ_MODULUS;
         if (delta == 0 || delta >= SEQ_HALF_RANGE) {
             outOfOrder++;

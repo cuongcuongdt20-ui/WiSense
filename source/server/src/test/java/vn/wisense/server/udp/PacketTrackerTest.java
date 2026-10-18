@@ -17,6 +17,24 @@ class PacketTrackerTest {
         assertEquals(1.0 / 3.0, s.loss(), 0.0001);
     }
 
+    @Test void acceptsSequenceRestartAfterEsp32Reset() {
+        PacketTracker tracker = new PacketTracker();
+        assertTrue(tracker.accept(5_000, 100));
+        assertTrue(tracker.accept(0, 200));
+        assertTrue(tracker.accept(1, 300));
+        PacketTracker.Snapshot snapshot = tracker.snapshot(400);
+        assertEquals(1, snapshot.lastSeq());
+        assertEquals(0, snapshot.missing());
+        assertEquals(3, snapshot.accepted());
+    }
+
+    @Test void rejectsOrdinaryOutOfOrderPacket() {
+        PacketTracker tracker = new PacketTracker();
+        assertTrue(tracker.accept(100, 100));
+        assertFalse(tracker.accept(99, 200));
+        assertEquals(1, tracker.snapshot(300).outOfOrder());
+    }
+
     @Test void handlesUnsignedSequenceWraparound() {
         PacketTracker tracker = new PacketTracker();
         assertTrue(tracker.accept(0xffff_ffffL, 100));
