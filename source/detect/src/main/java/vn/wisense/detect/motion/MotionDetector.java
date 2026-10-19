@@ -181,6 +181,7 @@ public final class MotionDetector implements Detector {
         events.add(Event.motion(f.sensorId(), level, s.moving));
     }
 
+
     @Override
     public synchronized void configure(String key, double value) {
         if (!"motionThr".equals(key)) {
@@ -188,16 +189,19 @@ public final class MotionDetector implements Detector {
                     "Unsupported motion config key: " + key);
         }
 
-        if (!Double.isFinite(value) || value <= 0.0) {
+        if (!Double.isFinite(value) || value < 0.0) {
             throw new IllegalArgumentException(
-                    "motionThr must be finite and greater than 0");
+                    "motionThr must be finite and non-negative");
         }
 
-        configuredThreshold = value;
+        configuredThreshold = value == 0.0 ? Double.NaN : value;
 
         LOG.log(System.Logger.Level.INFO,
-                "Motion threshold updated: " + value);
+                value == 0.0
+                        ? "Motion threshold reset to automatic mode"
+                        : "Motion threshold updated: " + value);
     }
+
 
     @Override
     public synchronized List<Event> poll() {

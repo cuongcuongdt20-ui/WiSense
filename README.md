@@ -163,3 +163,12 @@ Lệnh trên chạy được ngay trên khung rỗng và tải sẵn các thư v
 - `vn.wisense.server.ServerMain`: lớp `main` của `server/target/wisense-server.jar`
 - `vn.wisense.tools.ReplayMain`: lớp `main` của `tools/target/wisense-tools.jar`
 - `vn.wisense.client.Launcher`: lớp `main` của `client/target/wisense-client.jar` (không kế thừa `Application`, chỉ gọi lớp JavaFX chính, để jar gộp chạy được)
+
+### Motion Detection Threshold (`motionThr`)
+
+The `motionThr` configuration key controls the absolute threshold for motion detection. The detector compares the normalized amplitude variance (CV²) of the current window against this threshold.
+
+- **Automatic mode:** Set `motionThr = 0` to return to automatic thresholding. The detector uses `max(minThreshold, k × baseline)`.
+- **Manual mode:** Set `motionThr` to a finite positive number to use that absolute CV² threshold.
+- **Units:** Dimensionless normalized variance (CV²), not a percentage or a multiplier.
+- **Choosing a value:** The appropriate threshold depends on the sensor and its environment. Check the logged `baselineCv2` value and validate candidate thresholds against both still-room and movement data before deploying them. Do not assume one fixed value is suitable for every sensor.

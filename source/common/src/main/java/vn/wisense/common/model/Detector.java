@@ -1,4 +1,3 @@
-
 package vn.wisense.common.model;
 
 import java.util.List;
@@ -12,9 +11,10 @@ public interface Detector {
 
     /**
      * Cập nhật tham số khi server đang chạy.
-     * Detector không hỗ trợ khóa sẽ giữ nguyên cấu hình.
+     * Detector không hỗ trợ khóa sẽ báo lỗi.
      */
     default void configure(String key, double value) {
-        // Không hỗ trợ cấu hình động mặc định.
+        throw new IllegalArgumentException(
+                "Unsupported detector configuration: " + key);
     }
 }

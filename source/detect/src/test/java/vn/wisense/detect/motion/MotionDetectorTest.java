@@ -178,7 +178,7 @@ class MotionDetectorTest {
         assertEquals(MotionDetector.meanNormVariance(a), MotionDetector.meanNormVariance(b), 1e-9);
     }
 
-    
+
     @Test
     void sequenceResetClearsOldWindowAndRelearnsBaseline() {
         MotionDetector d = new MotionDetector();
@@ -237,14 +237,20 @@ class MotionDetectorTest {
     }
 
     @Test
+    void configureMotionThresholdZeroResetsToAutomaticMode() {
+        MotionDetector d = new MotionDetector();
+
+        assertDoesNotThrow(() -> d.configure("motionThr", 0.01));
+        assertDoesNotThrow(() -> d.configure("motionThr", 0.0));
+    }
+
+
+    @Test
     void configureMotionThresholdRejectsInvalidValues() {
         MotionDetector d = new MotionDetector();
 
         assertThrows(IllegalArgumentException.class,
                 () -> d.configure("unknownKey", 0.01));
-
-        assertThrows(IllegalArgumentException.class,
-                () -> d.configure("motionThr", 0.0));
 
         assertThrows(IllegalArgumentException.class,
                 () -> d.configure("motionThr", -1.0));

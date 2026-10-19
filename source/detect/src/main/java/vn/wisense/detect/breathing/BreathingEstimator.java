@@ -1,4 +1,3 @@
-
 package vn.wisense.detect.breathing;
 
 import vn.wisense.common.model.CsiFrame;
@@ -14,14 +13,27 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+
+/**
+ * Ước lượng nhịp thở bằng FFT trên biên độ trung bình (TV3).
+ */
 public final class BreathingEstimator implements Detector {
 
     private static final int N_FFT = 4096;
+
+    // Dải tần số nhịp thở: 0.15–0.5 Hz, tương đương 9–30 nhịp/phút.
     private static final double F_LO = 0.15;
     private static final double F_HI = 0.5;
+
+    // SNR tối thiểu để chấp nhận kết quả ước lượng.
     private static final double MIN_SNR = 3.0;
+
+    // Cần tối thiểu 30 giây dữ liệu trước khi ước lượng nhịp thở.
     private static final long MIN_DATA_US = 30_000_000L;
+
+    // Thực hiện ước lượng lại sau mỗi 5 giây.
     private static final long ESTIMATE_INTERVAL_US = 5_000_000L;
+
 
     public record Config(double windowSec, double fs) {
         public Config {
