@@ -44,7 +44,7 @@ Mô hình Client/Server ba tầng: cảm biến → server → các client giám
 
 ```text
 WiSense/
-├── report/                    báo cáo, slide, kịch bản demo                    (TV4)
+├── report/                    báo cáo, slide, kịch bản demo                    (cả nhóm)
 ├── data/                      dữ liệu mẫu: phòng trống, đi lại, ngồi thở, ngã  (TV1)
 ├── statics/results/           bảng sai số nhịp thở, ma trận nhầm lẫn té ngã    (TV3, TV4)
 ├── firmware/
