@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import com.google.gson.JsonObject;
 import java.util.List;
 import org.junit.jupiter.api.Test;
-import vn.wisense.common.model.Event;
 
 class MsgTest {
     @Test
@@ -32,7 +31,9 @@ class MsgTest {
 
     @Test
     void historyNhungEventLaObjectKhongPhaiChuoi() {
-        String json = Msg.history(1, List.of(Event.motion(1, 0.73, true).toJson(), Event.breath(1, 15.2, 4.1).toJson()));
+        String json = Msg.history(1, List.of(
+                "{\"t\":\"MOTION\",\"sensor\":1,\"level\":0.73,\"moving\":true}",
+                "{\"t\":\"BREATH\",\"sensor\":1,\"bpm\":15.2,\"snr\":4.1}"));
         assertEquals("{\"t\":\"HISTORY\",\"sensor\":1,\"events\":["
                 + "{\"t\":\"MOTION\",\"sensor\":1,\"level\":0.73,\"moving\":true},"
                 + "{\"t\":\"BREATH\",\"sensor\":1,\"bpm\":15.2,\"snr\":4.1}]}", json);

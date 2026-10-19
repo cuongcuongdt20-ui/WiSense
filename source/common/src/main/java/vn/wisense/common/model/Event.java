@@ -13,15 +13,18 @@ import java.util.concurrent.atomic.AtomicLong;
  * Dùng các hàm tạo sẵn bên dưới để ra đúng định dạng của hợp đồng. JSON do Gson sinh ra,
  * nên giá trị trong {@code fields} có thể là số, boolean, chuỗi hoặc mảng.
  *
- * <p>Mọi Event có trường {@code ts} (mili giây lúc tạo Event) ở cuối JSON, để client và LoadTestClient đo độ trễ.
- * Event FALL có thêm {@code id} tăng dần, không trùng trong một lần chạy server, để client bỏ tin trùng và gửi ACK.
- */
+ * Event FALL có thêm {@code id} tăng dần, không trùng kể cả khi server khởi động lại (id bắt đầu từ giờ hệ thống), để client bỏ tin trùng và gửi ACK.
+ * Mọi Event có trường ts (mili giây lúc tạo Event) để đo độ trễ.
+*/
 public record Event(String type, int sensorId, Map<String, Object> fields) {
 
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 
-    /** Bộ đếm id của FALL dùng chung cho cả server, bắt đầu từ 1. */
-    private static final AtomicLong FALL_ID = new AtomicLong();
+    /**
+     * Bộ đếm id của FALL dùng chung cho cả server. Bắt đầu từ giờ hệ thống (mili giây) lúc nạp lớp, nên server
+     * khởi động lại vẫn cho id lớn hơn mọi id lần chạy trước và client không coi FALL mới là trùng.
+     */
+    private static final AtomicLong FALL_ID = new AtomicLong(System.currentTimeMillis());
 
     /** Gán {@code ts} nếu chưa có, nên Event tạo trực tiếp bằng constructor cũng có ts. */
     public Event {

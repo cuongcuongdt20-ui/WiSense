@@ -80,7 +80,8 @@ class EventTest {
     void idCuaFallTangDanVaKhongTrungKhiNhieuLuongCungTao() throws Exception {
         Event a = Event.fall(1, 1L, 0.9);
         Event b = Event.fall(1, 1L, 0.9);
-        assertTrue(a.id() >= 1 && b.id() > a.id());
+        assertTrue(a.id() > 1_000_000_000_000L, "id phải bắt đầu từ giờ hệ thống, không phải từ 1");
+        assertTrue(b.id() > a.id());
         assertEquals(-1L, Event.motion(1, 0.1, false).id());
 
         Set<Long> ids = ConcurrentHashMap.newKeySet();
