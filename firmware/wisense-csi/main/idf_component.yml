@@ -1,0 +1,4 @@
+## Thư viện tải qua IDF Component Manager (giống ví dụ csi_recv của esp-csi)
+dependencies:
+  idf: ">=5.0"
+  esp_csi_gain_ctrl: ">=0.1.4"     # bù độ lợi AGC cho CSI
