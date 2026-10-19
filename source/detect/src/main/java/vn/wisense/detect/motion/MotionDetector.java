@@ -56,11 +56,33 @@ public final class MotionDetector implements Detector {
     public synchronized void onFrame(CsiFrame f) {
         if (f == null || f.amplitude() == null || f.amplitude().length == 0) return;
 
+
         S s = sensors.computeIfAbsent(f.sensorId(), id -> new S());
         long ts = f.timestampUs();
 
-        // bỏ gói trùng / sai thứ tự
-        if (s.lastSeq >= 0 && (f.seq() <= s.lastSeq || ts <= s.lastTs)) return;
+        // Phát hiện reset ESP32 trước bộ lọc gói trùng.
+        if (s.lastSeq >= 0 && s.lastTs >= 0) {
+            boolean seqReset = s.lastSeq - f.seq() > 100;
+            boolean timestampReset = s.lastTs - ts > 1_000_000L;
+
+            if (seqReset || timestampReset) {
+                // Xóa toàn bộ trạng thái phụ thuộc dữ liệu cũ.
+                s.window.clear();
+                s.lastSeq = -1;
+                s.lastTs = -1;
+                s.nextEvalUs = 0;
+                s.len = -1;
+                s.warm = 0;
+                s.baseline = 0;
+                s.moving = false;
+            }
+        }
+
+        // Loại gói trùng / sai thứ tự nếu không phải reset.
+        if (s.lastSeq >= 0 && (f.seq() <= s.lastSeq || ts <= s.lastTs)) {
+            return;
+        }
+
         s.lastSeq = f.seq();
         s.lastTs = ts;
 

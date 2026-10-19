@@ -177,4 +177,31 @@ class MotionDetectorTest {
         }
         assertEquals(MotionDetector.meanNormVariance(a), MotionDetector.meanNormVariance(b), 1e-9);
     }
+
+    
+    @Test
+    void esp32ResetDoesNotStopDetection() {
+        MotionDetector d = new MotionDetector();
+        Random rnd = new Random(42);
+
+        // ESP32 chạy bình thường với seq từ 500 đến 600.
+        for (long i = 500; i <= 600; i++) {
+            d.onFrame(calm(1, i, 20f, rnd));
+        }
+
+        d.poll();
+
+        // ESP32 khởi động lại: seq và timestamp trở về 0.
+        // Detector phải chấp nhận khung mới thay vì bỏ tất cả.
+        for (long i = 0; i <= 700; i++) {
+            d.onFrame(calm(1, i, 20f, rnd));
+        }
+
+        List<Event> evs = d.poll();
+
+        // Sau khi học nền lại, detector vẫn tiếp tục phát sự kiện.
+        assertFalse(evs.isEmpty());
+        assertTrue(evs.stream().anyMatch(e -> e.sensorId() == 1));
+    }
+
 }

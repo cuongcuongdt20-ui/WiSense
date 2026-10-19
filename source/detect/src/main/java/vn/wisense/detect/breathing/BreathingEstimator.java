@@ -43,18 +43,40 @@ public final class BreathingEstimator implements Detector {
     public synchronized void onFrame(CsiFrame f) {
         if (f == null || f.amplitude() == null || f.amplitude().length == 0) return;
 
-        S s = sensors.computeIfAbsent(f.sensorId(), id -> new S());
 
-        // bỏ gói trùng / sai thứ tự
-        if (s.lastSeq >= 0 && (f.seq() <= s.lastSeq || f.timestampUs() <= s.lastTs)) return;
-        s.lastSeq = f.seq();
-        s.lastTs = f.timestampUs();
+    S s = sensors.computeIfAbsent(f.sensorId(), id -> new S());
 
-        s.buf.addLast(new double[]{f.timestampUs(), meanAmp(f.amplitude())});
+    // Phát hiện ESP32 reset trước khi lọc gói trùng / sai thứ tự.
+    if (s.lastSeq >= 0 && s.lastTs >= 0) {
+        boolean seqReset = s.lastSeq - f.seq() > 100;
+        boolean timestampReset = s.lastTs - f.timestampUs() > 1_000_000L;
 
-        // bỏ các mẫu cũ hơn cửa sổ
-        long cutoff = f.timestampUs() - (long) (cfg.windowSec() * 1e6);
-        while (s.buf.peekFirst()[0] < cutoff) s.buf.removeFirst();
+        if (seqReset || timestampReset) {
+            s.buf.clear();
+            s.lastSeq = -1;
+            s.lastTs = -1;
+        }
+    }
+
+    // Vẫn loại bỏ gói trùng hoặc sai thứ tự nếu không phải reset.
+    if (s.lastSeq >= 0
+            && (f.seq() <= s.lastSeq || f.timestampUs() <= s.lastTs)) {
+        return;
+    }
+
+    s.lastSeq = f.seq();
+    s.lastTs = f.timestampUs();
+
+    s.buf.addLast(new double[]{
+            f.timestampUs(), meanAmp(f.amplitude())
+    });
+
+    // Bỏ các mẫu cũ hơn cửa sổ.
+    long cutoff = f.timestampUs() - (long) (cfg.windowSec() * 1e6);
+    while (!s.buf.isEmpty() && s.buf.peekFirst()[0] < cutoff) {
+        s.buf.removeFirst();
+    }
+
     }
 
     @Override
