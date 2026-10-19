@@ -46,6 +46,8 @@ public final class MotionDetector implements Detector {
     }
 
     private final Config cfg;
+    /** NaN nghĩa là dùng ngưỡng tự động theo baseline. */
+    private volatile double configuredThreshold = Double.NaN;
     private final Map<Integer, S> sensors = new HashMap<>();
     private final List<Event> events = new ArrayList<>();
 
@@ -157,8 +159,9 @@ public final class MotionDetector implements Detector {
             return;
         }
 
-        double thr = Math.max(
-                cfg.minThreshold(), cfg.k() * s.baseline);
+        double thr = Double.isNaN(configuredThreshold)
+        ? Math.max(cfg.minThreshold(), cfg.k() * s.baseline)
+        : configuredThreshold;
 
         if (!s.moving && raw > thr) {
             s.moving = true;
@@ -176,6 +179,24 @@ public final class MotionDetector implements Detector {
                 1.0, Math.log1p(raw / thr) / Math.log1p(10));
 
         events.add(Event.motion(f.sensorId(), level, s.moving));
+    }
+
+    @Override
+    public synchronized void configure(String key, double value) {
+        if (!"motionThr".equals(key)) {
+            throw new IllegalArgumentException(
+                    "Unsupported motion config key: " + key);
+        }
+
+        if (!Double.isFinite(value) || value <= 0.0) {
+            throw new IllegalArgumentException(
+                    "motionThr must be finite and greater than 0");
+        }
+
+        configuredThreshold = value;
+
+        LOG.log(System.Logger.Level.INFO,
+                "Motion threshold updated: " + value);
     }
 
     @Override

@@ -229,4 +229,31 @@ class MotionDetectorTest {
         }
     }
 
+    @Test
+    void configureMotionThresholdAcceptsPositiveFiniteValue() {
+        MotionDetector d = new MotionDetector();
+
+        assertDoesNotThrow(() -> d.configure("motionThr", 0.01));
+    }
+
+    @Test
+    void configureMotionThresholdRejectsInvalidValues() {
+        MotionDetector d = new MotionDetector();
+
+        assertThrows(IllegalArgumentException.class,
+                () -> d.configure("unknownKey", 0.01));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> d.configure("motionThr", 0.0));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> d.configure("motionThr", -1.0));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> d.configure("motionThr", Double.NaN));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> d.configure("motionThr", Double.POSITIVE_INFINITY));
+    }
+
 }
