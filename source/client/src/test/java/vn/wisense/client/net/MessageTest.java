@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class MessageTest {
@@ -31,6 +32,46 @@ class MessageTest {
         Message.Fall f = assertInstanceOf(Message.Fall.class,
                 Message.parse("{\"t\":\"FALL\",\"sensor\":1,\"time\":1739000000,\"confidence\":0.8}"));
         assertEquals(1739000000L, f.time());
+        assertEquals(-1, f.id());                           // server cũ chưa gửi id
+    }
+
+    @Test
+    void parsesFallWithId() {
+        Message.Fall f = assertInstanceOf(Message.Fall.class,
+                Message.parse("{\"t\":\"FALL\",\"sensor\":2,\"time\":5,\"confidence\":0.8,\"id\":42,\"ts\":1739000000123}"));
+        assertEquals(42, f.id());
+        assertEquals(2, f.sensor());
+    }
+
+    @Test
+    void parsesWelcome() {
+        Message.Welcome w = assertInstanceOf(Message.Welcome.class,
+                Message.parse("{\"t\":\"WELCOME\",\"session\":7,\"sensors\":[1,3]}"));
+        assertEquals(7, w.session());
+        assertEquals(List.of(1, 3), w.sensors());
+    }
+
+    @Test
+    void parsesOkAndError() {
+        assertEquals("SUBSCRIBE", assertInstanceOf(Message.Ok.class,
+                Message.parse("{\"t\":\"OK\",\"re\":\"SUBSCRIBE\"}")).re());
+        Message.ServerError e = assertInstanceOf(Message.ServerError.class,
+                Message.parse("{\"t\":\"ERROR\",\"code\":\"BAD_ARG\",\"msg\":\"limit sai\"}"));
+        assertEquals("BAD_ARG", e.code());
+        assertEquals("limit sai", e.msg());
+    }
+
+    @Test
+    void parsesHistoryAndSkipsUnknownEvents() {
+        Message.History h = assertInstanceOf(Message.History.class, Message.parse(
+                "{\"t\":\"HISTORY\",\"sensor\":1,\"events\":["
+                        + "{\"t\":\"FALL\",\"sensor\":1,\"time\":5,\"confidence\":0.8,\"id\":3},"
+                        + "{\"t\":\"NEW\",\"sensor\":1},"
+                        + "{\"t\":\"BREATH\",\"sensor\":1,\"bpm\":15.2,\"snr\":4.1}]}"));
+        assertEquals(1, h.sensor());
+        assertEquals(2, h.events().size());
+        assertInstanceOf(Message.Fall.class, h.events().get(0));
+        assertInstanceOf(Message.Breath.class, h.events().get(1));
     }
 
     @Test

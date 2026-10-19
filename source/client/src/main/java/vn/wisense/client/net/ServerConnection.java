@@ -7,27 +7,37 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Queue;
+import java.util.Set;
 import java.util.function.Consumer;
+import vn.wisense.common.protocol.FrameCodec;
+import vn.wisense.common.protocol.Msg;
 
 /**
- * Kết nối TCP tới server trên một luồng nền: đọc khung "4 byte độ dài + JSON",
- * trả PONG cho PING, rớt thì tự nối lại sau 2 giây. Tin nhận được chỉ được bỏ vào hàng đợi.
+ * Kết nối TCP tới server trên một luồng nền: gửi HELLO, nhận WELCOME thì SUBSCRIBE,
+ * trả PONG cho PING, trả ACK cho FALL và bỏ FALL trùng id, rớt thì tự nối lại sau 2 giây.
+ * Tin nhận được chỉ được bỏ vào hàng đợi; giao diện gửi lệnh qua {@link #request}.
  */
 public class ServerConnection implements Runnable {
-    private static final int MAX_FRAME = 1 << 20;          // 1 MB, chặn độ dài rác
+    private static final int SEEN_FALLS = 1000;            // số id FALL gần nhất nhớ để lọc trùng
     private final String host;
     private final int port;
+    private final String name;                             // giữ nguyên qua các lần nối lại để server gửi lại FALL
     private final Queue<Message> inbox;
     private final Consumer<Boolean> onStatus;               // gọi từ luồng nền
+    private final Set<Long> seenFalls = new LinkedHashSet<>();  // chỉ luồng nền dùng
     private volatile boolean running = true;
     private volatile Socket socket;
     private volatile DataOutputStream out;
+    private volatile List<Integer> sensors;                 // null: đăng ký mọi sensor trong WELCOME
 
-    public ServerConnection(String host, int port, Queue<Message> inbox, Consumer<Boolean> onStatus) {
+    public ServerConnection(String host, int port, String name, Queue<Message> inbox, Consumer<Boolean> onStatus) {
         this.host = host;
         this.port = port;
+        this.name = name;
         this.inbox = inbox;
         this.onStatus = onStatus;
     }
@@ -48,16 +58,12 @@ public class ServerConnection implements Runnable {
                 DataInputStream in = new DataInputStream(new BufferedInputStream(s.getInputStream()));
                 out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
                 onStatus.accept(true);
-                while (running) {
-                    int len = in.readInt();
-                    if (len <= 0 || len > MAX_FRAME) throw new IOException("Do dai khung sai: " + len);
-                    byte[] buf = new byte[len];
-                    in.readFully(buf);
-                    handle(new String(buf, StandardCharsets.UTF_8));
-                }
+                send(Msg.hello(name));                      // SUBSCRIBE gửi khi nhận WELCOME
+                while (running) handle(FrameCodec.readFrame(in));
             } catch (IOException e) {
                 // server tắt, mạng rớt hoặc hết thời gian chờ: rơi xuống và nối lại
             }
+            out = null;
             onStatus.accept(false);
             if (running) sleep(2000);
         }
@@ -71,23 +77,62 @@ public class ServerConnection implements Runnable {
             System.err.println("Bo tin hong: " + json);   // khung đã đọc đủ nên luồng không lệch
             return;
         }
-        if (m instanceof Message.Ping) send("{\"t\":\"PONG\"}");
-        else if (m != null) inbox.offer(m);
+        switch (m) {
+            case null -> { }
+            case Message.Ping p -> send(Msg.pong());
+            case Message.Welcome w -> {
+                List<Integer> wanted = sensors;
+                send(Msg.subscribe(wanted != null ? wanted : w.sensors(), true));
+                inbox.offer(w);
+            }
+            case Message.Fall f when f.id() >= 0 -> {
+                send(Msg.ack(f.id()));                      // ACK cả bản gửi lại, vì ACK trước có thể đã mất
+                if (seenFalls.add(f.id())) {
+                    if (seenFalls.size() > SEEN_FALLS) {
+                        Iterator<Long> it = seenFalls.iterator();
+                        it.next();
+                        it.remove();
+                    }
+                    inbox.offer(f);
+                }
+            }
+            default -> inbox.offer(m);
+        }
     }
 
-    public synchronized void send(String json) throws IOException {
-        byte[] b = json.getBytes(StandardCharsets.UTF_8);
-        out.writeInt(b.length);
-        out.write(b);
-        out.flush();
+    /** Đổi các sensor muốn nhận; đang kết nối thì gửi SUBSCRIBE ngay, chưa thì gửi sau WELCOME. */
+    public void setSensors(List<Integer> wanted) {
+        sensors = List.copyOf(wanted);
+        if (out != null) request(Msg.subscribe(sensors, true));
+    }
+
+    /** Gửi một lệnh (GET_HISTORY, SET_CONFIG, ...); lỗi được báo qua hàng đợi như tin ERROR. */
+    public void request(String json) {
+        try {
+            send(json);
+        } catch (IOException e) {
+            inbox.offer(new Message.ServerError("NOT_CONNECTED", "Chưa kết nối được server"));
+        }
+    }
+
+    /** Luồng nền gửi PONG, ACK còn luồng giao diện gửi lệnh nên phải khoá. */
+    private synchronized void send(String json) throws IOException {
+        DataOutputStream o = out;
+        if (o == null) throw new IOException("Chua ket noi");
+        FrameCodec.writeFrame(o, json);
     }
 
     public void stop() {
         running = false;
+        try {
+            send(Msg.bye());
+        } catch (IOException ignored) {
+            // đã rớt thì không cần chào
+        }
         Socket s = socket;
         if (s != null) {
             try {
-                s.close();                                  // làm readInt ném lỗi, luồng thoát ra
+                s.close();                                  // làm readFrame ném lỗi, luồng thoát ra
             } catch (IOException ignored) {
             }
         }

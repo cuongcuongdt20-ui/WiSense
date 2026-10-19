@@ -31,6 +31,12 @@ public class SignalChart {
         return chart;
     }
 
+    /** Xoá dữ liệu cũ khi đổi sang cảm biến khác. */
+    public void clear() {
+        series.getData().clear();
+        lastT = -1;
+    }
+
     public void add(float[] amp) {
         if (amp.length == 0) return;
         double t = (System.nanoTime() - t0) / 1e9;

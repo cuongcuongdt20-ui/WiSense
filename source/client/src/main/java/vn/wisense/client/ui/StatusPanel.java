@@ -15,18 +15,30 @@ public class StatusPanel {
     private final ProgressBar level = new ProgressBar(0);
     private final Label bpm = new Label("Nhịp thở: —");
     private final Label snr = new Label();
+    private final Label title = new Label("Cảm biến 1");
     private long lastBreathMs;
 
     public StatusPanel() {
         motion.setStyle("-fx-font-size: 18; -fx-font-weight: bold;");
         bpm.setStyle("-fx-font-size: 22;");
-        box.getChildren().addAll(new Label("Cảm biến 1"), motion, level, bpm, snr);
+        box.getChildren().addAll(title, motion, level, bpm, snr);
         box.setPadding(new Insets(12));
         box.setPrefWidth(240);
     }
 
     public Node node() {
         return box;
+    }
+
+    /** Đổi sang cảm biến khác: xoá trạng thái của cảm biến cũ. */
+    public void setSensor(int sensor) {
+        title.setText("Cảm biến " + sensor);
+        motion.setText("Chưa có dữ liệu");
+        motion.setTextFill(Color.BLACK);
+        level.setProgress(0);
+        bpm.setText("Nhịp thở: —");
+        snr.setText("");
+        lastBreathMs = 0;
     }
 
     public void showMotion(Message.Motion m) {
