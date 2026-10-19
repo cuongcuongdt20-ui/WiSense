@@ -1,3 +1,4 @@
+
 package vn.wisense.common.model;
 
 import java.util.List;
@@ -8,4 +9,12 @@ public interface Detector {
 
     /** Trả về các sự kiện mới kể từ lần gọi trước và xóa chúng khỏi hàng đợi. */
     List<Event> poll();
+
+    /**
+     * Cập nhật tham số khi server đang chạy.
+     * Detector không hỗ trợ khóa sẽ giữ nguyên cấu hình.
+     */
+    default void configure(String key, double value) {
+        // Không hỗ trợ cấu hình động mặc định.
+    }
 }
