@@ -8,4 +8,9 @@ public interface Detector {
 
     /** Trả về các sự kiện mới kể từ lần gọi trước và xóa chúng khỏi hàng đợi. */
     List<Event> poll();
+
+    /** Optional live configuration hook; implementations validate supported keys and ranges. */
+    default void configure(String key, double value) {
+        throw new IllegalArgumentException("Unsupported detector configuration: " + key);
+    }
 }
