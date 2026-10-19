@@ -71,6 +71,7 @@ WiSense/
     │                          CommandHandler: xử lí lệnh, trạng thái phiên (đang làm)            (TV2)
     │                          FallDelivery: FALL chờ ACK, gửi lại                                (TV1)
     ├── tools/                 ReplayMain: phát lại file thành UDP giả                             (TV2)
+    │                          RecordMain: ghi gói UDP từ ESP32 ra CSV cho ReplayMain             (TV1)
     │                          LoadTestClient: mở N client đo độ trễ, thông lượng (đang làm)      (TV3)
     └── client/                JavaFX
         └── vn.wisense.client
@@ -151,6 +152,19 @@ mvn clean verify
 
 Lệnh trên chạy được ngay trên khung rỗng và tải sẵn các thư viện về máy.
 
+Ghi dữ liệu thật từ ESP32 rồi phát lại (chạy trong `source/`):
+
+```bash
+# ghi 60 giây vào file; --forward chuyển tiếp từng gói cho server để vừa ghi vừa xem trên client
+java -jar server/target/wisense-server.jar --udp-port=5006
+java -cp tools/target/wisense-tools.jar vn.wisense.tools.RecordMain --out=../data/walk_01.csv --seconds=60 --forward=127.0.0.1:5006
+
+# phát lại file đã ghi vào server
+java -jar tools/target/wisense-tools.jar --file=../data/walk_01.csv
+```
+
+File CSV có dạng `sensorId,seq,timestampUs,rssi,imag0,real0,...`, dòng bắt đầu bằng `#` là ghi chú. Bỏ `--seconds` thì ghi tới khi bấm Ctrl+C.
+
 ## Thư viện ngoài
 
 - Gson 2.11.0: đọc ghi JSON
@@ -162,4 +176,5 @@ Lệnh trên chạy được ngay trên khung rỗng và tải sẵn các thư v
 
 - `vn.wisense.server.ServerMain`: lớp `main` của `server/target/wisense-server.jar`
 - `vn.wisense.tools.ReplayMain`: lớp `main` của `tools/target/wisense-tools.jar`
+- `vn.wisense.tools.RecordMain`: nằm trong cùng jar, chạy bằng `java -cp tools/target/wisense-tools.jar vn.wisense.tools.RecordMain`
 - `vn.wisense.client.Launcher`: lớp `main` của `client/target/wisense-client.jar` (không kế thừa `Application`, chỉ gọi lớp JavaFX chính, để jar gộp chạy được)
