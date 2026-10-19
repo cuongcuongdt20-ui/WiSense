@@ -72,7 +72,7 @@ WiSense/
     │                          FallDelivery: FALL chờ ACK, gửi lại                                (TV1)
     ├── tools/                 ReplayMain: phát lại file thành UDP giả                             (TV2)
     │                          RecordMain: ghi gói UDP từ ESP32 ra CSV cho ReplayMain             (TV1)
-    │                          LoadTestClient: mở N client đo độ trễ, thông lượng (đang làm)      (TV3)
+    │                          LoadTestClient: mở N client đo độ trễ, thông lượng, client chậm    (TV1)
     └── client/                JavaFX
         └── vn.wisense.client
             ├── net/           ServerConnection: bắt tay, gửi lệnh, ACK, tự nối lại; Message      (TV1)
@@ -164,6 +164,15 @@ java -jar tools/target/wisense-tools.jar --file=../data/walk_01.csv
 ```
 
 File CSV có dạng `sensorId,seq,timestampUs,rssi,imag0,real0,...`, dòng bắt đầu bằng `#` là ghi chú. Bỏ `--seconds` thì ghi tới khi bấm Ctrl+C.
+
+Đo hiệu năng phần TCP (chạy cùng máy với server để dùng chung đồng hồ):
+
+```bash
+java -cp tools/target/wisense-tools.jar vn.wisense.tools.LoadTestClient --clients=50 --seconds=30 --label=c50
+java -cp tools/target/wisense-tools.jar vn.wisense.tools.LoadTestClient --clients=10 --slow-clients=1 --slow-ms=500 --seconds=90 --label=slow
+```
+
+Mỗi client ghi một dòng vào `statics/results/loadtest.csv`: tin/giây, byte/giây, độ trễ p50/p95/max (giờ nhận − `ts`), số FALL và bản trùng, thời gian bắt tay, có bị ngắt không. Tuỳ chọn khác: `--no-ack`, `--no-signal`, `--sensors=1,2`, `--host`, `--port`.
 
 ## Thư viện ngoài
 
