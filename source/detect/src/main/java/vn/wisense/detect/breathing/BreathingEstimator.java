@@ -54,6 +54,10 @@ public final class BreathingEstimator implements Detector {
     record SpectralEstimate(double bpm, double snr) {}
 
     private final Config cfg;
+
+    /** Ngưỡng SNR có thể cập nhật khi detector đang chạy. */
+    private volatile double configuredMinSnr = MIN_SNR;
+
     private final Map<Integer, S> sensors = new HashMap<>();
     private final List<Event> events = new ArrayList<>();
 
@@ -134,10 +138,30 @@ public final class BreathingEstimator implements Detector {
 
         SpectralEstimate estimate = analyze(x, cfg.fs());
 
-        if (estimate.bpm() > 0 && estimate.snr() >= MIN_SNR) {
+        if (estimate.bpm() > 0
+                && estimate.snr() >= configuredMinSnr) {
             events.add(Event.breath(
                     f.sensorId(), estimate.bpm(), estimate.snr()));
         }
+    }
+
+    @Override
+    public synchronized void configure(String key, double value) {
+        if (!"breathMinSnr".equals(key)) {
+            throw new IllegalArgumentException(
+                    "Unsupported breathing config key: " + key);
+        }
+
+        if (!Double.isFinite(value) || value <= 0.0) {
+            throw new IllegalArgumentException(
+                    "breathMinSnr must be finite and greater than 0");
+        }
+
+        configuredMinSnr = value;
+
+        System.getLogger(BreathingEstimator.class.getName()).log(
+                System.Logger.Level.INFO,
+                "Breathing minimum SNR updated: " + value);
     }
 
     @Override

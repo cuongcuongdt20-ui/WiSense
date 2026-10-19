@@ -5,7 +5,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Random;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BreathingEstimatorTest {
@@ -119,5 +121,39 @@ class BreathingEstimatorTest {
         }
 
         assertEquals(15.0, BreathingEstimator.peakBpm(x, fs), 0.5);
+    }
+
+    @Test
+    void configureMinSnrAcceptsPositiveFiniteValue() {
+        BreathingEstimator detector = new BreathingEstimator();
+
+        assertDoesNotThrow(
+                () -> detector.configure("breathMinSnr", 4.0));
+    }
+
+    @Test
+    void configureMinSnrRejectsUnsupportedKey() {
+        BreathingEstimator detector = new BreathingEstimator();
+
+        assertThrows(IllegalArgumentException.class,
+                () -> detector.configure("unknownKey", 3.0));
+    }
+
+    @Test
+    void configureMinSnrRejectsInvalidValues() {
+        BreathingEstimator detector = new BreathingEstimator();
+
+        assertThrows(IllegalArgumentException.class,
+                () -> detector.configure("breathMinSnr", 0.0));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> detector.configure("breathMinSnr", -1.0));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> detector.configure("breathMinSnr", Double.NaN));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> detector.configure(
+                        "breathMinSnr", Double.POSITIVE_INFINITY));
     }
 }
