@@ -18,6 +18,7 @@ import java.util.Map;
 public final class EventLog {
     private static final int MAX_PER_SENSOR = 500;
     private final Map<Integer, Deque<String>> bySensor = new HashMap<>();
+    private final Map<Integer, Boolean> lastMovingBySensor = new HashMap<>();
     private final Path csvPath;
 
     public EventLog(Path csvPath) { this.csvPath = csvPath; }
@@ -25,6 +26,12 @@ public final class EventLog {
     /** Stores only useful history events; high-volume SIGNAL and periodic STATS are intentionally skipped. */
     public synchronized void record(Event event) {
         if (event == null || !(event.type().equals("MOTION") || event.type().equals("BREATH") || event.type().equals("FALL"))) return;
+        if (event.type().equals("MOTION")) {
+            Object movingValue = event.fields().get("moving");
+            if (!(movingValue instanceof Boolean moving)) return;
+            Boolean previousMoving = lastMovingBySensor.put(event.sensorId(), moving);
+            if (previousMoving != null && previousMoving == moving) return;
+        }
         String json = event.toJson();
         Deque<String> history = bySensor.computeIfAbsent(event.sensorId(), ignored -> new ArrayDeque<>());
         history.addFirst(json);

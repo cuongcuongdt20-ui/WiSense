@@ -1,6 +1,5 @@
 package vn.wisense.server.tcp;
 
-import com.google.gson.JsonObject;
 import vn.wisense.common.model.Event;
 import vn.wisense.common.protocol.Msg;
 
@@ -17,7 +16,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 /** TCP server using 4-byte big-endian length + UTF-8 JSON frames. */
 public final class TcpServer implements AutoCloseable {
@@ -26,7 +24,6 @@ public final class TcpServer implements AutoCloseable {
     private final Set<ClientSession> clients = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean();
     private final AtomicInteger nextSession = new AtomicInteger(1);
-    private final AtomicLong fallIds = new AtomicLong();
     private final ScheduledExecutorService heartbeat = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "wisense-tcp-heartbeat"); t.setDaemon(true); return t;
     });
@@ -50,7 +47,7 @@ public final class TcpServer implements AutoCloseable {
         ServerSocket ss = new ServerSocket();
         try {
             ss.setReuseAddress(true);
-            ss.bind(new java.net.InetSocketAddress(port));
+            ss.bind(new java.net.InetSocketAddress(port), 512);
             serverSocket = ss;
         } catch (IOException e) {
             running.set(false);
@@ -59,7 +56,7 @@ public final class TcpServer implements AutoCloseable {
         }
         FallDelivery fd = fallDelivery;
         if (fd != null) fd.start();
-        heartbeat.scheduleAtFixedRate(() -> broadcastRaw(addServerTimestamp(Msg.ping(), false)), 5, 5, TimeUnit.SECONDS);
+        heartbeat.scheduleAtFixedRate(() -> broadcastRaw(Msg.ping()), 5, 5, TimeUnit.SECONDS);
         acceptThread = new Thread(this::acceptLoop, "wisense-tcp-accept");
         acceptThread.setDaemon(true);
         acceptThread.start();
@@ -84,7 +81,6 @@ public final class TcpServer implements AutoCloseable {
                     System.out.println("Client connected: " + socket.getRemoteSocketAddress());
                 } catch (SocketException e) {
                     if (running.get()) System.err.println("TCP accept failed: " + e.getMessage());
-                    if (running.get()) close();
                 } catch (IOException e) {
                     if (running.get()) System.err.println("Could not create client session: " + e.getMessage());
                 }
@@ -96,13 +92,11 @@ public final class TcpServer implements AutoCloseable {
 
     public void broadcast(Event event) {
         if (event == null) return;
-        String json = addServerTimestamp(event.toJson(), event.type().equals("FALL"));
-        if (event.type().equals("FALL")) {
+        String json = event.toJson();
+        if ("FALL".equals(event.type())) {
             FallDelivery fd = fallDelivery;
             if (fd != null) {
-                JsonObject o = com.google.gson.JsonParser.parseString(json).getAsJsonObject();
-                long id = o.get("id").getAsLong();
-                fd.onFall(event.sensorId(), id, json);
+                fd.onFall(event.sensorId(), event.id(), json);
                 return;
             }
         }
@@ -111,7 +105,7 @@ public final class TcpServer implements AutoCloseable {
 
     public void broadcastRaw(String json) {
         for (ClientSession client : clients) {
-            if (json.contains("\"t\":\"PING\"")) client.enqueueJson(json);
+            client.enqueueJson(json);
         }
     }
 
@@ -119,13 +113,6 @@ public final class TcpServer implements AutoCloseable {
         for (ClientSession client : clients) {
             if (client.wantsEvent(sensor, type)) client.enqueueJson(json);
         }
-    }
-
-    private String addServerTimestamp(String json, boolean fall) {
-        JsonObject object = com.google.gson.JsonParser.parseString(json).getAsJsonObject();
-        object.addProperty("ts", System.currentTimeMillis());
-        if (fall && !object.has("id")) object.addProperty("id", fallIds.incrementAndGet());
-        return object.toString();
     }
 
     void removeClient(ClientSession client) { clients.remove(client); }

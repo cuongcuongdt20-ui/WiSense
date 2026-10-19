@@ -122,7 +122,7 @@ public final class CommandHandler {
     }
 
     private void ack(ClientSession s, JsonObject m) {
-        requireSubscribed(s);
+        requireAuthed(s);
         long id = longInteger(m, "id");
         if (id < 0) throw new IllegalArgumentException("id must be non-negative");
         if (fallDelivery != null) fallDelivery.ack(s.name(), id);

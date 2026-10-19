@@ -49,15 +49,20 @@ public final class SensorManager implements AutoCloseable {
     public void configure(int sensorId, String key, double value) {
         if (!sensors.containsKey(sensorId)) throw new IllegalArgumentException("Unknown sensor: " + sensorId);
         boolean supported = false;
+        IllegalArgumentException lastError = null;
         for (Detector detector : detectors) {
             try {
                 detector.configure(key, value);
                 supported = true;
             } catch (IllegalArgumentException e) {
-                // Detectors may support different keys; collect failures below if none accepts it.
+                // Detectors may support different keys; preserve the last validation error if none accepts it.
+                lastError = e;
             }
         }
-        if (!supported) throw new IllegalArgumentException("Unknown configuration key: " + key);
+        if (!supported) {
+            if (lastError != null) throw lastError;
+            throw new IllegalArgumentException("Unknown configuration key: " + key);
+        }
     }
 
     public void onFrame(CsiFrame frame, PacketTracker.Snapshot stats) {
