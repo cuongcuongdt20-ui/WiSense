@@ -177,4 +177,89 @@ class MotionDetectorTest {
         }
         assertEquals(MotionDetector.meanNormVariance(a), MotionDetector.meanNormVariance(b), 1e-9);
     }
+
+
+    @Test
+    void sequenceResetClearsOldWindowAndRelearnsBaseline() {
+        MotionDetector d = new MotionDetector();
+        Random rnd = new Random(42);
+
+        // Học nền ở phiên chạy đầu.
+        warmup(d, rnd, 20f);
+        d.poll();
+
+        // ESP32 khởi động lại: seq quay về 0, timestamp quay về 0.
+        for (long i = 0; i < 600; i++) {
+            d.onFrame(calm(1, i, 64, 20f, rnd, STEP));
+        }
+
+        List<Event> events = d.poll();
+
+        // Không được dùng ngay trạng thái chuyển động/nền cũ.
+        assertFalse(events.isEmpty());
+        for (Event e : events) {
+            assertFalse(moving(e));
+        }
+    }
+
+    @Test
+    void timestampResetClearsOldWindow() {
+        MotionDetector d = new MotionDetector();
+        Random rnd = new Random(42);
+
+        warmup(d, rnd, 20f);
+        d.poll();
+
+        // seq vẫn tăng nhưng timestamp quay lùi hơn 1 giây.
+        for (long i = 600; i < 1200; i++) {
+            long resetSeq = i;
+            long resetTs = (i - 600) * STEP;
+            float[] amp = new float[64];
+            Arrays.fill(amp, 20f);
+
+            d.onFrame(new CsiFrame(
+                    1, resetSeq, resetTs, -50, amp, new float[64]));
+        }
+
+        List<Event> events = d.poll();
+        assertFalse(events.isEmpty());
+
+        for (Event e : events) {
+            assertFalse(moving(e));
+        }
+    }
+
+    @Test
+    void configureMotionThresholdAcceptsPositiveFiniteValue() {
+        MotionDetector d = new MotionDetector();
+
+        assertDoesNotThrow(() -> d.configure("motionThr", 0.01));
+    }
+
+    @Test
+    void configureMotionThresholdZeroResetsToAutomaticMode() {
+        MotionDetector d = new MotionDetector();
+
+        assertDoesNotThrow(() -> d.configure("motionThr", 0.01));
+        assertDoesNotThrow(() -> d.configure("motionThr", 0.0));
+    }
+
+
+    @Test
+    void configureMotionThresholdRejectsInvalidValues() {
+        MotionDetector d = new MotionDetector();
+
+        assertThrows(IllegalArgumentException.class,
+                () -> d.configure("unknownKey", 0.01));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> d.configure("motionThr", -1.0));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> d.configure("motionThr", Double.NaN));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> d.configure("motionThr", Double.POSITIVE_INFINITY));
+    }
+
 }
