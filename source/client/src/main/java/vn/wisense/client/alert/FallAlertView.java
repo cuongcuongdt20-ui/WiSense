@@ -41,6 +41,10 @@ public class FallAlertView implements FallAlertHandler {
     private final VBox panel = new VBox(4);
     private final Popup[] slots = new Popup[MAX_POPUPS];
     private final PauseTransition[] timers = new PauseTransition[MAX_POPUPS];
+    
+    /** Thứ tự mở của từng ô (số càng nhỏ càng cũ). Dùng bộ đếm thay vì giờ để không bao giờ trùng nhau. */
+    private final long[] openedSeq = new long[MAX_POPUPS];
+    private long popupCounter;
 
     /** @param owner cửa sổ chính; popup hiện ở góc trên bên phải cửa sổ này. */
     public FallAlertView(Window owner) {
@@ -84,8 +88,8 @@ public class FallAlertView implements FallAlertHandler {
         if (owner == null || !owner.isShowing()) return;      // chưa có cửa sổ: vẫn có dòng trong danh sách
 
         int slot = freeSlot();
-        if (slot < 0) {                                       // đủ 4 popup: đóng cái cũ nhất để lấy chỗ
-            slot = 0;
+        if (slot < 0) {                                       // đủ 4 popup: đóng cái mở sớm nhất để lấy chỗ
+            slot = oldestSlot();
             closeSlot(slot);
         }
 
@@ -112,6 +116,7 @@ public class FallAlertView implements FallAlertHandler {
         popup.setAutoHide(false);                             // không tự đóng khi bấm ra ngoài, không chặn thao tác
         popup.getContent().add(box);
         slots[s] = popup;
+        openedSeq[s] = ++popupCounter;
         double x = owner.getX() + owner.getWidth() - POPUP_WIDTH - 24;
         double y = owner.getY() + 48 + s * (POPUP_HEIGHT + 10);
         popup.show(owner, x, y);
@@ -132,6 +137,13 @@ public class FallAlertView implements FallAlertHandler {
         timers[i] = null;
         if (slots[i] != null) slots[i].hide();
         slots[i] = null;
+    }
+
+    /** Ô đang mở có thứ tự mở nhỏ nhất, tức popup cũ nhất. Chỉ gọi khi mọi ô đều đang mở. */
+    private int oldestSlot() {
+        int oldest = 0;
+        for (int i = 1; i < slots.length; i++) if (openedSeq[i] < openedSeq[oldest]) oldest = i;
+        return oldest;
     }
 
     private static void beep() {
