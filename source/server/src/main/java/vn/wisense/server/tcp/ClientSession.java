@@ -1,5 +1,8 @@
 package vn.wisense.server.tcp;
 
+import vn.wisense.common.protocol.FrameCodec;
+import vn.wisense.common.protocol.Msg;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
@@ -7,106 +10,117 @@ import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
-import java.util.function.Consumer;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-/** One connected client. Reads framed client messages (especially PONG) and writes framed JSON. */
-public final class ClientSession implements AutoCloseable {
+/** One TCP client session: one reader, one writer, and a bounded outgoing queue. */
+public final class ClientSession implements AutoCloseable, FallDelivery.Recipient {
+    public enum State { CONNECTED, AUTHED, SUBSCRIBED, CLOSED }
+    private static final int OUTGOING_QUEUE_CAPACITY = 256;
     private final Socket socket;
-    private final Consumer<ClientSession> onClose;
+    private final TcpServer owner;
     private final DataInputStream in;
     private final DataOutputStream out;
-    private volatile boolean running = true;
-    private static final int OUTGOING_QUEUE_CAPACITY = 256;
     private final BlockingQueue<String> outgoing = new ArrayBlockingQueue<>(OUTGOING_QUEUE_CAPACITY);
+    private final Set<Integer> sensors = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private volatile State state = State.CONNECTED;
+    private volatile String name;
+    private volatile boolean wantSignal;
+    private volatile int sessionId;
+    private volatile CommandHandler commandHandler;
 
-    ClientSession(Socket socket, Consumer<ClientSession> onClose) throws IOException {
+    ClientSession(Socket socket, TcpServer owner, CommandHandler handler, int sessionId) throws IOException {
         this.socket = socket;
-        this.socket.setSoTimeout(15_000); // server heartbeat is every 5 seconds
-        this.onClose = onClose;
-        this.in = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
-        this.out = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
+        this.owner = owner;
+        this.commandHandler = handler;
+        this.sessionId = sessionId;
+        socket.setSoTimeout(15_000);
+        socket.setTcpNoDelay(true);
+        in = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
+        out = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
     }
 
+    void setCommandHandler(CommandHandler handler) { this.commandHandler = handler; }
     void start() {
         Thread writer = new Thread(this::writeLoop, "wisense-writer-" + socket.getRemoteSocketAddress());
-        writer.setDaemon(true);
-        writer.start();
+        writer.setDaemon(true); writer.start();
         Thread reader = new Thread(this::readLoop, "wisense-reader-" + socket.getRemoteSocketAddress());
-        reader.setDaemon(true);
-        reader.start();
+        reader.setDaemon(true); reader.start();
     }
 
-    /** Enqueues quickly; socket writes happen only on this client's writer thread. */
+    public boolean send(String json) { return enqueueJson(json); }
     public boolean enqueueJson(String json) {
-        if (!running || json == null) return false;
+        if (closed.get() || json == null) return false;
         if (outgoing.offer(json)) return true;
-
-        // SIGNAL is the least critical/highest-volume message: discard one queued
-        // SIGNAL before sacrificing a MOTION/BREATH/FALL/STATS event.
+        // Drop queued SIGNAL first. If only important messages remain, disconnect this client only.
         for (String queued : outgoing) {
-            if (queued.contains("\"t\":\"SIGNAL\"")) {
-                if (outgoing.remove(queued)) break;
-            }
+            if (isSignal(queued) && outgoing.remove(queued)) break;
         }
         if (outgoing.offer(json)) return true;
-        // Queue is still full of important messages. Disconnect this slow client
-        // instead of allowing it to stall the UDP/detector pipeline.
         close();
         return false;
     }
 
+    private static boolean isSignal(String json) {
+        return json.contains("\"t\":\"SIGNAL\"") || json.contains("\"t\" : \"SIGNAL\"");
+    }
+
     private void writeLoop() {
         try {
-            while (running) {
+            while (!closed.get()) {
                 String json = outgoing.poll(1, TimeUnit.SECONDS);
-                if (json == null) continue;
-                byte[] payload = json.getBytes(StandardCharsets.UTF_8);
-                if (payload.length == 0 || payload.length > TcpServer.DEFAULT_MAX_FRAME_BYTES)
-                    throw new IOException("Invalid outgoing JSON frame length: " + payload.length);
-                out.writeInt(payload.length);
-                out.write(payload);
-                out.flush();
+                if (json != null) FrameCodec.writeFrame(out, json);
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } catch (IOException ignored) {
-            // A disconnected or blocked client must not affect other clients.
-        } finally {
-            close();
-        }
+        } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        catch (IOException ignored) { /* only this client is closed */ }
+        finally { close(); }
     }
 
     private void readLoop() {
         try {
-            while (running) {
-                int length;
-                try { length = in.readInt(); }
+            while (!closed.get()) {
+                String json;
+                try { json = FrameCodec.readFrame(in); }
                 catch (EOFException e) { break; }
-                if (length <= 0 || length > TcpServer.DEFAULT_MAX_FRAME_BYTES)
-                    throw new IOException("Invalid incoming frame length: " + length);
-                byte[] payload = new byte[length];
-                in.readFully(payload);
-                String json = new String(payload, StandardCharsets.UTF_8);
-                // The current client only needs PING/PONG. Ignore other inbound messages safely.
-                if (json.contains("\"t\"") && json.contains("\"PING\"")) {
-                    // PING is normally server-to-client; echoing PONG for a PING from a client is harmless.
-                    enqueueJson("{\"t\":\"PONG\"}");
-                }
+                CommandHandler handler = commandHandler;
+                if (handler == null) send(Msg.error(Msg.INVALID_STATE, "Server is initializing"));
+                else handler.handle(this, json);
             }
-        } catch (IOException ignored) {
-            // A disconnected or malformed client is removed without stopping the server.
-        } finally { close(); }
+        } catch (IOException ignored) { /* malformed frame or disconnected client */ }
+        finally { close(); }
+    }
+
+    State state() { return state; }
+    void authenticate(String clientName) {
+        name = clientName;
+        state = State.AUTHED;
+    }
+    void subscribe(Iterable<Integer> ids, boolean signal) {
+        sensors.clear();
+        ids.forEach(sensors::add);
+        wantSignal = signal;
+        state = State.SUBSCRIBED;
+    }
+    int sessionId() { return sessionId; }
+    boolean wantsSignal() { return wantSignal; }
+    boolean isSubscribed() { return state == State.SUBSCRIBED; }
+    @Override public String name() { return name; }
+    @Override public boolean wants(int sensor) { return isSubscribed() && sensors.contains(sensor); }
+    boolean wantsEvent(int sensor, String type) {
+        if (type.equals("PING")) return !closed.get();
+        if (!wants(sensor)) return false;
+        return !type.equals("SIGNAL") || wantSignal;
     }
 
     @Override public void close() {
-        if (!running) return;
-        running = false;
+        if (!closed.compareAndSet(false, true)) return;
+        state = State.CLOSED;
         outgoing.clear();
         try { socket.close(); } catch (IOException ignored) {}
-        onClose.accept(this);
+        owner.removeClient(this);
     }
 }
