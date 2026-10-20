@@ -98,4 +98,28 @@ class MessageTest {
     void unknownTypeIsIgnored() {
         assertNull(Message.parse("{\"t\":\"NEW\",\"sensor\":1}"));
     }
+
+    @Test
+    void parsesFallWithIdFromSystemClock() {
+        // server đặt id bắt đầu từ giờ hệ thống (~1,7×10^12): phải đọc bằng long, không bị cắt như int
+        Message.Fall f = assertInstanceOf(Message.Fall.class, Message.parse(
+                "{\"t\":\"FALL\",\"sensor\":1,\"time\":1739000000,\"confidence\":0.8,\"id\":1760000000123,\"ts\":1760000000456}"));
+        assertEquals(1760000000123L, f.id());
+    }
+
+    @Test
+    void ignoresTimestampFieldOnEveryEventType() {
+        // mọi tin đẩy của server có thêm ts ở cuối; client phải bỏ qua mà không lỗi
+        assertInstanceOf(Message.Motion.class, Message.parse(
+                "{\"t\":\"MOTION\",\"sensor\":1,\"level\":0.73,\"moving\":true,\"ts\":1760000000456}"));
+        assertInstanceOf(Message.Breath.class, Message.parse(
+                "{\"t\":\"BREATH\",\"sensor\":1,\"bpm\":15.2,\"snr\":4.1,\"ts\":1760000000456}"));
+        assertInstanceOf(Message.Stats.class, Message.parse(
+                "{\"t\":\"STATS\",\"sensor\":1,\"pps\":98,\"loss\":0.02,\"ts\":1760000000456}"));
+        assertInstanceOf(Message.Signal.class, Message.parse(
+                "{\"t\":\"SIGNAL\",\"sensor\":1,\"amp\":[20.5,21.0],\"ts\":1760000000456}"));
+    }
+
+
+
 }

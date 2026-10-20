@@ -5,26 +5,46 @@ import com.google.gson.GsonBuilder;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Sự kiện / tin để server gửi tới client qua TCP (JSON). {@code type} là trường "t",
  * {@code sensorId} là trường "sensor", {@code fields} là các trường còn lại theo đúng thứ tự thêm vào.
  * Dùng các hàm tạo sẵn bên dưới để ra đúng định dạng của hợp đồng. JSON do Gson sinh ra,
  * nên giá trị trong {@code fields} có thể là số, boolean, chuỗi hoặc mảng.
- */
+ *
+ * Event FALL có thêm {@code id} tăng dần, không trùng kể cả khi server khởi động lại (id bắt đầu từ giờ hệ thống), để client bỏ tin trùng và gửi ACK.
+ * Mọi Event có trường ts (mili giây lúc tạo Event) để đo độ trễ.
+*/
 public record Event(String type, int sensorId, Map<String, Object> fields) {
 
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 
+    /**
+     * Bộ đếm id của FALL dùng chung cho cả server. Bắt đầu từ giờ hệ thống (mili giây) lúc nạp lớp, nên server
+     * khởi động lại vẫn cho id lớn hơn mọi id lần chạy trước và client không coi FALL mới là trùng.
+     */
+    private static final AtomicLong FALL_ID = new AtomicLong(System.currentTimeMillis());
+
+    /** Gán {@code ts} nếu chưa có, nên Event tạo trực tiếp bằng constructor cũng có ts. */
     public Event {
-        fields = Collections.unmodifiableMap(new LinkedHashMap<>(fields));
+        Map<String, Object> f = new LinkedHashMap<>(fields);
+        f.putIfAbsent("ts", System.currentTimeMillis());
+        fields = Collections.unmodifiableMap(f);
     }
 
-    /** {"t":"FALL","sensor":1,"time":1739000000,"confidence":0.8} */
+    /** {"t":"FALL","sensor":1,"time":1739000000,"confidence":0.8,"id":42,"ts":1739000000123}; id và ts tự gán. */
     public static Event fall(int sensorId, long timeSec, double confidence) {
+        return fall(sensorId, timeSec, confidence, FALL_ID.incrementAndGet(), System.currentTimeMillis());
+    }
+
+    /** Bản chỉ định id và ts, dùng cho test và phát lại; không đụng tới bộ đếm id. */
+    public static Event fall(int sensorId, long timeSec, double confidence, long id, long ts) {
         Map<String, Object> f = new LinkedHashMap<>();
         f.put("time", timeSec);
         f.put("confidence", round2(confidence));
+        f.put("id", id);
+        f.put("ts", ts);
         return new Event("FALL", sensorId, f);
     }
 
@@ -59,6 +79,17 @@ public record Event(String type, int sensorId, Map<String, Object> fields) {
         Map<String, Object> f = new LinkedHashMap<>();
         f.put("amp", a);
         return new Event("SIGNAL", sensorId, f);
+    }
+
+    /** Thời điểm tạo Event, mili giây. */
+    public long ts() {
+        return ((Number) fields.get("ts")).longValue();
+    }
+
+    /** id của FALL; -1 nếu Event này không có id. */
+    public long id() {
+        Object v = fields.get("id");
+        return v == null ? -1 : ((Number) v).longValue();
     }
 
     /** Lấy một trường số, ném lỗi nếu không có hoặc không phải số. */
