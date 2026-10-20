@@ -1,17 +1,21 @@
 package vn.wisense.server.tcp;
 
 import vn.wisense.common.model.Event;
+import vn.wisense.common.protocol.Msg;
 
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** TCP server using 4-byte big-endian length + UTF-8 JSON frames. */
 public final class TcpServer implements AutoCloseable {
@@ -19,45 +23,84 @@ public final class TcpServer implements AutoCloseable {
     private final int port;
     private final Set<ClientSession> clients = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean();
+    private final AtomicInteger nextSession = new AtomicInteger(1);
     private final ScheduledExecutorService heartbeat = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "wisense-tcp-heartbeat"); t.setDaemon(true); return t;
     });
     private volatile ServerSocket serverSocket;
+    private volatile Thread acceptThread;
+    private volatile CommandHandler commandHandler;
+    private volatile FallDelivery fallDelivery;
 
     public TcpServer(int port) {
         if (port < 1 || port > 65_535) throw new IllegalArgumentException("Invalid TCP port: " + port);
         this.port = port;
     }
 
-    public void run() throws IOException {
+    public void setCommandHandler(CommandHandler handler) { this.commandHandler = handler; }
+    public void setFallDelivery(FallDelivery delivery) { this.fallDelivery = delivery; }
+    public List<ClientSession> sessions() { return new ArrayList<>(clients); }
+
+    /** Binds synchronously so startup fails before UDP reception begins if the TCP port is unavailable. */
+    public synchronized void start() throws IOException {
         if (!running.compareAndSet(false, true)) throw new IllegalStateException("TCP server already running");
-        try (ServerSocket ss = new ServerSocket(port)) {
+        ServerSocket ss = new ServerSocket();
+        try {
+            ss.setReuseAddress(true);
+            ss.bind(new java.net.InetSocketAddress(port), 512);
             serverSocket = ss;
-            heartbeat.scheduleAtFixedRate(() -> broadcastRaw("{\"t\":\"PING\"}"), 5, 5, TimeUnit.SECONDS);
-            System.out.println("TCP server listening on port " + port);
+        } catch (IOException e) {
+            running.set(false);
+            try { ss.close(); } catch (IOException ignored) {}
+            throw e;
+        }
+        FallDelivery fd = fallDelivery;
+        if (fd != null) fd.start();
+        heartbeat.scheduleAtFixedRate(() -> broadcastRaw(Msg.ping()), 5, 5, TimeUnit.SECONDS);
+        acceptThread = new Thread(this::acceptLoop, "wisense-tcp-accept");
+        acceptThread.setDaemon(true);
+        acceptThread.start();
+        System.out.println("TCP server listening on port " + port);
+    }
+
+    /** Compatibility entry point for callers that prefer a blocking run method. */
+    public void run() throws IOException {
+        start();
+        try { Thread t = acceptThread; if (t != null) t.join(); }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); close(); }
+    }
+
+    private void acceptLoop() {
+        try {
             while (running.get()) {
                 try {
-                    Socket socket = ss.accept();
-                    socket.setTcpNoDelay(true);
-                    ClientSession session = new ClientSession(socket, this::removeClient);
+                    Socket socket = serverSocket.accept();
+                    ClientSession session = new ClientSession(socket, this, commandHandler, nextSession.getAndIncrement());
                     clients.add(session);
                     session.start();
                     System.out.println("Client connected: " + socket.getRemoteSocketAddress());
                 } catch (SocketException e) {
-                    if (running.get()) throw e;
+                    if (running.get()) System.err.println("TCP accept failed: " + e.getMessage());
+                } catch (IOException e) {
+                    if (running.get()) System.err.println("Could not create client session: " + e.getMessage());
                 }
             }
         } finally {
             running.set(false);
-            serverSocket = null;
-            heartbeat.shutdownNow();
-            for (ClientSession client : clients.toArray(ClientSession[]::new)) client.close();
-            clients.clear();
         }
     }
 
     public void broadcast(Event event) {
-        if (event != null) broadcastRaw(event.toJson());
+        if (event == null) return;
+        String json = event.toJson();
+        if ("FALL".equals(event.type())) {
+            FallDelivery fd = fallDelivery;
+            if (fd != null) {
+                fd.onFall(event.sensorId(), event.id(), json);
+                return;
+            }
+        }
+        broadcastEvent(event.sensorId(), event.type(), json);
     }
 
     public void broadcastRaw(String json) {
@@ -66,16 +109,24 @@ public final class TcpServer implements AutoCloseable {
         }
     }
 
-    private void removeClient(ClientSession client) { clients.remove(client); }
+    private void broadcastEvent(int sensor, String type, String json) {
+        for (ClientSession client : clients) {
+            if (client.wantsEvent(sensor, type)) client.enqueueJson(json);
+        }
+    }
+
+    void removeClient(ClientSession client) { clients.remove(client); }
     public int clientCount() { return clients.size(); }
 
     @Override public void close() {
-        running.set(false);
+        if (!running.getAndSet(false) && serverSocket == null) return;
         ServerSocket current = serverSocket;
-        if (current != null) {
-            try { current.close(); } catch (IOException ignored) {}
-        }
+        serverSocket = null;
+        if (current != null) try { current.close(); } catch (IOException ignored) {}
         for (ClientSession client : clients.toArray(ClientSession[]::new)) client.close();
+        clients.clear();
         heartbeat.shutdownNow();
+        FallDelivery fd = fallDelivery;
+        if (fd != null) fd.close();
     }
 }
