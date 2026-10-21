@@ -15,7 +15,7 @@
         <module>detect</module>
         <module>server</module>
         <module>tools</module>
-        <module>client</module>
+        <module>admin_desktop</module>
     </modules>
 
     <properties>
