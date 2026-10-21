@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import vn.wisense.common.auth.Credentials;
 import vn.wisense.common.protocol.FrameCodec;
 import vn.wisense.common.protocol.Msg;
 
@@ -33,7 +34,10 @@ import vn.wisense.common.protocol.Msg;
  * <pre>
  * java -cp wisense-tools.jar vn.wisense.tools.LoadTestClient --clients=50 --seconds=30 --label=c50
  * java -cp wisense-tools.jar vn.wisense.tools.LoadTestClient --clients=10 --slow-clients=1 --slow-ms=200 --label=slow
+ * java -cp wisense-tools.jar vn.wisense.tools.LoadTestClient --clients=50 --user=khanh --password=... --label=auth
  * </pre>
+ * Server bật xác thực thì cần --user và --password (hoặc biến môi trường WISENSE_PASSWORD); mọi client dùng chung
+ * tài khoản, key PBKDF2 chỉ tính một lần nên thời gian bắt tay đo được là thời gian của CHALLENGE/AUTH trên mạng.
  * Kết quả: mỗi client một dòng, ghi thêm vào statics/results/loadtest.csv (đổi bằng --out).
  */
 public final class LoadTestClient {
@@ -41,7 +45,7 @@ public final class LoadTestClient {
     private LoadTestClient() {}
 
     record Config(String host, int port, int clients, int seconds, List<Integer> sensors, boolean signal,
-                  int slowClients, int slowMs, boolean ack, String label, Path out) {}
+                  int slowClients, int slowMs, boolean ack, String label, Path out, Credentials credentials) {}
 
     /** Kết quả một client. latencies: độ trễ từng tin có ts (ms), đã sắp tăng dần. */
     record Result(int client, boolean slow, long msgs, long bytes, long falls, long dupFalls,
@@ -98,7 +102,8 @@ public final class LoadTestClient {
             s.setTcpNoDelay(true);
             DataInputStream in = new DataInputStream(new BufferedInputStream(s.getInputStream()));
             DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
-            FrameCodec.writeFrame(out, Msg.hello("load-" + id));
+            Credentials creds = cfg.credentials();
+            FrameCodec.writeFrame(out, Msg.hello("load-" + id, creds == null ? null : creds.user()));
             while (true) {
                 String json = FrameCodec.readFrame(in);
                 long now = System.currentTimeMillis();
@@ -106,6 +111,12 @@ public final class LoadTestClient {
                 if (o == null) continue;
                 String type = Msg.type(o);
                 switch (type) {
+                    case Msg.CHALLENGE -> {
+                        if (creds == null) throw new IOException("Server yeu cau dang nhap: chay voi --user va --password");
+                        FrameCodec.writeFrame(out, Msg.auth(creds.answer(o.get("nonce").getAsString(),
+                                o.get("salt").getAsString(), o.get("iter").getAsInt())));
+                        continue;
+                    }
                     case Msg.WELCOME -> {
                         handshakeMs = now - t0;
                         FrameCodec.writeFrame(out, Msg.subscribe(cfg.sensors(), cfg.signal()));
@@ -212,7 +223,16 @@ public final class LoadTestClient {
                 List.copyOf(ids), !Arrays.asList(args).contains("--no-signal"),
                 (int) longArg(args, "--slow-clients", 0), (int) longArg(args, "--slow-ms", 0),
                 !Arrays.asList(args).contains("--no-ack"), stringArg(args, "--label", "run"),
-                Path.of(stringArg(args, "--out", "statics/results/loadtest.csv")));
+                Path.of(stringArg(args, "--out", "statics/results/loadtest.csv")), credentials(args));
+    }
+
+    /** --user và --password (hoặc WISENSE_PASSWORD); không có --user thì không đăng nhập (server --no-auth). */
+    private static Credentials credentials(String[] args) {
+        String user = stringArg(args, "--user", "");
+        if (user.isBlank()) return null;
+        String password = stringArg(args, "--password", System.getenv().getOrDefault("WISENSE_PASSWORD", ""));
+        if (password.isEmpty()) throw new IllegalArgumentException("--user can kem --password hoac bien WISENSE_PASSWORD");
+        return Credentials.user(user, password.toCharArray());
     }
 
     private static long longField(JsonObject o, String key) {

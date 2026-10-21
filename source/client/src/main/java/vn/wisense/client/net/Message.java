@@ -29,12 +29,32 @@ public sealed interface Message {
         }
     }
 
-    /** Trả lời HELLO: số phiên, mọi sensor server từng thấy, và các sensor đang online. */
-    record Welcome(int session, List<Integer> sensors, List<Integer> online) implements Message {
+    /**
+     * Trả lời HELLO (sau AUTH nếu server bật xác thực): số phiên, các sensor được xem, các sensor đang online,
+     * tài khoản đã đăng nhập (null khi server --no-auth) và quyền "admin" hoặc "viewer".
+     */
+    record Welcome(int session, List<Integer> sensors, List<Integer> online, String user, String access)
+            implements Message {
         public Welcome(int session, List<Integer> sensors) {
             this(session, sensors, List.of());
         }
 
+        public Welcome(int session, List<Integer> sensors, List<Integer> online) {
+            this(session, sensors, online, null, Msg.ACCESS_ADMIN);
+        }
+
+        /** Được đổi cấu hình (SET_SENSOR, SET_CONFIG). */
+        public boolean isAdmin() {
+            return Msg.ACCESS_ADMIN.equals(access);
+        }
+
+        public int sensor() {
+            return 0;
+        }
+    }
+
+    /** Server yêu cầu chứng minh mật khẩu hoặc khoá: trả AUTH với proof tính từ nonce. */
+    record Challenge(String nonce, String salt, int iterations) implements Message {
         public int sensor() {
             return 0;
         }
@@ -65,6 +85,36 @@ public sealed interface Message {
         }
     }
 
+    // ------------------------------------------------------------ trả lời lệnh quản trị (chỉ admin nhận)
+
+    record SensorInfo(int sensor, boolean online, boolean tcp, boolean key) {}
+
+    record Sensors(List<SensorInfo> sensors) implements Message {
+        public int sensor() {
+            return 0;
+        }
+    }
+
+    /** Khoá mới của một cảm biến, để admin nạp vào ESP32. */
+    record SensorKey(int sensor, String secret) implements Message {}
+
+    record UserInfo(String user, String access, String sensors) {}
+
+    record Users(List<UserInfo> users) implements Message {
+        public int sensor() {
+            return 0;
+        }
+    }
+
+    record SessionInfo(int session, String role, String name, String user, String address, String state,
+                       boolean self) {}
+
+    record Sessions(List<SessionInfo> sessions) implements Message {
+        public int sensor() {
+            return 0;
+        }
+    }
+
     /** Các sự kiện gần đây của một sensor, mới nhất trước. */
     record History(int sensor, List<Message> events) implements Message {}
 
@@ -83,14 +133,34 @@ public sealed interface Message {
             case "SIGNAL" -> new Signal(sensor(o), floats(o.getAsJsonArray("amp")));
             case Msg.PING -> new Ping();
             case Msg.WELCOME -> new Welcome(o.get("session").getAsInt(), ints(o.getAsJsonArray("sensors")),
-                    o.has("online") ? ints(o.getAsJsonArray("online")) : List.of());
+                    o.has("online") ? ints(o.getAsJsonArray("online")) : List.of(),
+                    o.has("user") ? o.get("user").getAsString() : null,
+                    o.has("access") ? o.get("access").getAsString() : Msg.ACCESS_ADMIN);
+            case Msg.CHALLENGE -> new Challenge(o.get("nonce").getAsString(), o.get("salt").getAsString(),
+                    o.get("iter").getAsInt());
             case Msg.SENSOR_STATUS -> new SensorStatus(sensor(o), o.get("online").getAsBoolean());
             case Msg.OK -> new Ok(o.get("re").getAsString(), Msg.req(o));
             case Msg.ERROR -> new ServerError(o.get("code").getAsString(),
                     o.has("msg") ? o.get("msg").getAsString() : "", Msg.req(o));
             case Msg.HISTORY -> new History(sensor(o), events(o.getAsJsonArray("events")));
+            case Msg.SENSORS -> new Sensors(objects(o, "sensors").stream().map(x -> new SensorInfo(
+                    x.get("sensor").getAsInt(), x.get("online").getAsBoolean(), x.get("tcp").getAsBoolean(),
+                    x.get("key").getAsBoolean())).toList());
+            case Msg.SENSOR_KEY -> new SensorKey(sensor(o), o.get("secret").getAsString());
+            case Msg.USERS -> new Users(objects(o, "users").stream().map(x -> new UserInfo(
+                    x.get("user").getAsString(), x.get("access").getAsString(), x.get("sensors").getAsString())).toList());
+            case Msg.SESSIONS -> new Sessions(objects(o, "sessions").stream().map(x -> new SessionInfo(
+                    x.get("session").getAsInt(), x.get("role").getAsString(), x.get("name").getAsString(),
+                    x.get("user").getAsString(), x.get("address").getAsString(), x.get("state").getAsString(),
+                    x.has("self") && x.get("self").getAsBoolean())).toList());
             default -> null;
         };
+    }
+
+    private static List<JsonObject> objects(JsonObject o, String key) {
+        List<JsonObject> r = new ArrayList<>();
+        for (JsonElement e : o.getAsJsonArray(key)) r.add(e.getAsJsonObject());
+        return r;
     }
 
     private static int sensor(JsonObject o) {

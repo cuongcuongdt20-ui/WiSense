@@ -8,6 +8,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.function.Consumer;
 import javafx.animation.AnimationTimer;
 import javafx.geometry.Insets;
 import javafx.scene.Parent;
@@ -16,8 +17,6 @@ import javafx.scene.control.Button;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListView;
-import javafx.scene.control.TextField;
-import javafx.scene.control.TextInputDialog;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.paint.Color;
@@ -27,45 +26,61 @@ import vn.wisense.client.net.Message;
 import vn.wisense.client.net.ServerConnection;
 import vn.wisense.common.protocol.Msg;
 
-/** Màn hình chính; AnimationTimer lấy tin từ hàng đợi mỗi khung hình rồi cập nhật giao diện. */
+/**
+ * Màn hình chính, mở sau khi đăng nhập; AnimationTimer lấy tin từ hàng đợi mỗi khung hình rồi cập nhật giao diện.
+ * Tài khoản viewer không thấy nút đổi tần số; bị server từ chối đăng nhập khi nối lại thì quay về màn đăng nhập.
+ */
 public class MainView {
     private static final int HISTORY_LIMIT = 50;
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault());
-    private final ConcurrentLinkedQueue<Message> inbox = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<Message> inbox;
     private final BorderPane root = new BorderPane();
-    private final TextField hostField = new TextField("127.0.0.1");
-    private final TextField portField = new TextField("7000");
-    private final Label connLabel = new Label("Chưa kết nối");
+    private final Label connLabel = new Label();
+    private final Label userLabel = new Label();
     private final ComboBox<Integer> sensorBox = new ComboBox<>();
     private final Button historyButton = new Button("Lịch sử");
-    private final Button rateButton = new Button("Tần số");
+    private final Button adminButton = new Button("⚙ Quản trị");
     private final Label sensorState = new Label();
     private final Label statsLabel = new Label("—");
     private final Label errorLabel = new Label();
     private final SignalChart chart = new SignalChart();
     private final StatusPanel status = new StatusPanel();
-    private final String clientName = defaultName();
     private final Set<Integer> online = new HashSet<>();    // chỉ luồng JavaFX dùng
-    private volatile boolean connected;
-    private ServerConnection conn;
+    private final Consumer<String> onLogout;
+    private final ServerConnection conn;
+    private final AnimationTimer timer;
+    private volatile boolean connected = true;
+    private boolean closed;
     private int shown = 1;                                  // sensor đang hiển thị
-    private long nextReq = 1;                               // mã yêu cầu cho lệnh SET_SENSOR
+    private AdminView admin;                                // chỉ tạo khi tài khoản admin bấm Quản trị
     private long errorUntilMs;
     private FallAlertHandler fallHandler = f -> System.out.println("FALL " + f);  // TV4 thay bằng bản thật
 
-    public MainView() {
-        Button connect = new Button("Kết nối");
-        connect.setOnAction(e -> connect());
-        portField.setPrefColumnCount(5);
+    /** onLogout nhận lời nhắn cho màn đăng nhập (null khi người dùng tự đăng xuất). */
+    public MainView(LoginView.Session session, Consumer<String> onLogout) {
+        this.conn = session.connection();
+        this.inbox = session.inbox();
+        this.onLogout = onLogout;
+        conn.setOnStatus(ok -> connected = ok);
+        Message.Welcome w = session.welcome();
+        userLabel.setText(w.user() == null ? "" : "👤 " + w.user() + " (" + w.access() + ")");
+        Button logout = new Button("Đăng xuất");
+        logout.setOnAction(e -> close(null));
         sensorBox.setPromptText("Cảm biến");
         sensorBox.setDisable(true);
         sensorBox.setOnAction(e -> selectSensor(sensorBox.getValue()));
-        historyButton.setDisable(true);
         historyButton.setOnAction(e -> conn.request(Msg.getHistory(shown, HISTORY_LIMIT)));
-        rateButton.setDisable(true);
-        rateButton.setOnAction(e -> askSampleRate());
-        HBox top = new HBox(8, new Label("Server"), hostField, new Label("Cổng"), portField, connect, connLabel,
-                new Label("Cảm biến"), sensorBox, sensorState, historyButton, rateButton);
+        // Đổi tần số, ngưỡng, tài khoản đều nằm trong cửa sổ Quản trị; viewer không thấy nút này,
+        // và server vẫn chặn bằng FORBIDDEN nếu viewer cố gửi lệnh.
+        String user = w.user() == null ? "admin" : w.user();
+        adminButton.setOnAction(e -> {
+            if (admin == null) admin = new AdminView(conn, user);
+            admin.show();
+        });
+        adminButton.setVisible(w.isAdmin());
+        adminButton.setManaged(w.isAdmin());
+        HBox top = new HBox(8, connLabel, userLabel, new Label("Cảm biến"), sensorBox, sensorState,
+                historyButton, adminButton, logout);
         top.setPadding(new Insets(8));
         errorLabel.setTextFill(Color.CRIMSON);
         HBox bottom = new HBox(16, statsLabel, errorLabel);
@@ -74,12 +89,14 @@ public class MainView {
         root.setCenter(chart.node());
         root.setRight(status.node());
         root.setBottom(bottom);                             // TV4 đặt lịch sử té ngã cạnh đây
-        new AnimationTimer() {
+        onWelcome(w);
+        timer = new AnimationTimer() {
             @Override
             public void handle(long now) {
                 drain();
             }
-        }.start();
+        };
+        timer.start();
     }
 
     public Parent root() {
@@ -90,52 +107,48 @@ public class MainView {
         fallHandler = h;
     }
 
-    /** Để phần cảnh báo (TV4) gửi lệnh nếu cần; null khi chưa bấm Kết nối. */
+    /** Để phần cảnh báo (TV4) gửi lệnh nếu cần. */
     public ServerConnection connection() {
         return conn;
     }
 
+    /** Đóng app: chỉ ngắt kết nối. */
     public void disconnect() {
-        if (conn != null) conn.stop();
+        timer.stop();
+        if (admin != null) admin.close();
+        conn.stop();
     }
 
-    private void connect() {
+    /** Đăng xuất (notice = null) hoặc bị server từ chối khi nối lại: ngắt rồi quay về màn đăng nhập. */
+    private void close(String notice) {
+        if (closed) return;
+        closed = true;
         disconnect();
-        try {
-            int port = Integer.parseInt(portField.getText().trim());
-            conn = new ServerConnection(hostField.getText().trim(), port, clientName, inbox, ok -> connected = ok);
-            conn.setSensors(List.of(shown));                // chưa nối nên chỉ ghi nhớ, gửi khi có WELCOME
-            conn.start();
-            historyButton.setDisable(false);
-            rateButton.setDisable(false);
-        } catch (NumberFormatException e) {
-            connLabel.setText("Cổng không hợp lệ");
-        }
+        onLogout.accept(notice);
     }
 
     private void selectSensor(Integer s) {
-        if (s == null || s == shown) return;
-        shown = s;
-        chart.clear();
-        status.setSensor(s);
-        statsLabel.setText("—");
-        showSensorState();
-        if (conn != null) conn.setSensors(List.of(s));
+        if (s == null) return;
+        if (s != shown) {
+            shown = s;
+            chart.clear();
+            status.setSensor(s);
+            statsLabel.setText("—");
+            showSensorState();
+        }
+        conn.setSensors(List.of(s));                        // chỉ nhận dữ liệu cảm biến đang xem
     }
 
-    /** Hỏi tần số lấy mẫu mới rồi gửi SET_SENSOR; server chuyển xuống cảm biến, OK hoặc ERROR trả về sau. */
-    private void askSampleRate() {
-        TextInputDialog dialog = new TextInputDialog("100");
-        dialog.setTitle("Đổi tần số lấy mẫu");
-        dialog.setHeaderText("Cảm biến " + shown + ": số lần ping router mỗi giây");
-        dialog.setContentText("Từ 1 đến 200:");
-        dialog.showAndWait().ifPresent(text -> {
-            try {
-                conn.request(Msg.setSensor(nextReq++, shown, Integer.parseInt(text.trim())));
-            } catch (NumberFormatException e) {
-                showError("Tần số phải là số nguyên");
-            }
-        });
+    private void onWelcome(Message.Welcome w) {
+        online.clear();
+        online.addAll(w.online());
+        showSensors(w.sensors());
+        showSensorState();
+    }
+
+    /** Câu trả lời lệnh quản trị: chuyển sang cửa sổ Quản trị (đã đóng thì bỏ). */
+    private void toAdmin(Message m) {
+        if (admin != null) admin.handle(m);
     }
 
     private void showSensorState() {
@@ -145,9 +158,10 @@ public class MainView {
     }
 
     private void drain() {
-        if (conn != null) connLabel.setText(connected ? "● Đã kết nối" : "● Đang nối lại...");
+        connLabel.setText(connected ? "● Đã kết nối" : "● Đang nối lại...");
+        connLabel.setTextFill(connected ? Color.SEAGREEN : Color.DARKORANGE);
         Message m;
-        while ((m = inbox.poll()) != null) {
+        while (!closed && (m = inbox.poll()) != null) {
             switch (m) {
                 case Message.Signal s when s.sensor() == shown -> chart.add(s.amp());
                 case Message.Motion mo when mo.sensor() == shown -> status.showMotion(mo);
@@ -155,15 +169,24 @@ public class MainView {
                 case Message.Stats st when st.sensor() == shown -> statsLabel.setText(
                         String.format("Cảm biến %d · %d gói/giây · mất %.1f%%", st.sensor(), st.pps(), st.loss() * 100));
                 case Message.Fall f -> fallHandler.onFall(f);           // té ngã ở sensor nào cũng báo
-                case Message.Welcome w -> {
-                    online.clear();
-                    online.addAll(w.online());
-                    showSensors(w.sensors());
-                    showSensorState();
+                case Message.Welcome w -> onWelcome(w);            // nối lại sau khi rớt mạng
+                case Message.SensorStatus st -> {
+                    onSensorStatus(st);
+                    if (admin != null && admin.isShowing()) admin.handle(st);
                 }
-                case Message.SensorStatus st -> onSensorStatus(st);
                 case Message.History h -> showHistory(h);
-                case Message.Ok ok when Msg.SET_SENSOR.equals(ok.re()) -> showNotice("Cảm biến đã áp dụng tần số mới");
+                case Message.Sensors x -> toAdmin(x);
+                case Message.Users x -> toAdmin(x);
+                case Message.Sessions x -> toAdmin(x);
+                case Message.SensorKey x -> toAdmin(x);
+                case Message.Ok ok when ok.req() >= AdminView.REQ_BASE -> toAdmin(ok);
+                case Message.ServerError err when Msg.KICKED.equals(err.code()) ->
+                        close("Quản trị viên đã ngắt kết nối của bạn: " + err.msg());
+                case Message.ServerError err when Msg.AUTH_FAILED.equals(err.code())
+                        || Msg.TOO_MANY_ATTEMPTS.equals(err.code()) -> close("Phiên đăng nhập không còn hợp lệ, đăng nhập lại");
+                case Message.ServerError err when err.req() >= AdminView.REQ_BASE -> toAdmin(err);
+                case Message.ServerError err when Msg.FORBIDDEN.equals(err.code()) ->
+                        showError("Tài khoản không có quyền: " + err.msg());
                 case Message.ServerError err -> showError(err.code() + ": " + err.msg());
                 default -> { }                              // PING, OK khác, tin của sensor khác
             }
@@ -191,6 +214,7 @@ public class MainView {
         if (!sensorBox.getItems().contains(st.sensor())) {
             sensorBox.getItems().add(st.sensor());           // cảm biến mới xuất hiện sau khi đã kết nối
             sensorBox.setDisable(false);
+            if (sensorBox.getValue() == null) sensorBox.setValue(st.sensor());   // chưa xem gì: xem luôn cảm biến này
         }
         if (st.sensor() == shown) {
             showSensorState();
@@ -231,7 +255,7 @@ public class MainView {
     }
 
     /** Tên cố định trong một lần chạy: server dùng tên này để gửi lại FALL khi client nối lại. */
-    private static String defaultName() {
+    public static String defaultName() {
         String host;
         try {
             host = InetAddress.getLocalHost().getHostName();

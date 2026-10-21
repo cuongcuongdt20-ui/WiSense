@@ -58,7 +58,7 @@ class LoadTestClientTest {
             server.start();
 
             LoadTestClient.Config cfg = new LoadTestClient.Config("127.0.0.1", ss.getLocalPort(), 1, 5,
-                    List.of(2), false, 0, 0, true, "test", Path.of("unused.csv"));
+                    List.of(2), false, 0, 0, true, "test", Path.of("unused.csv"), null);
             LoadTestClient.Result r = LoadTestClient.runClient(cfg, 3, false, new ArrayList<>());
             server.join(3000);
 

@@ -1,6 +1,7 @@
 package vn.wisense.server;
 
 import vn.wisense.common.model.Detector;
+import vn.wisense.server.auth.Authenticator;
 import vn.wisense.server.sensor.CsiIngest;
 import vn.wisense.server.sensor.EventLog;
 import vn.wisense.server.sensor.SensorManager;
@@ -24,7 +25,11 @@ import java.util.concurrent.CountDownLatch;
  * --udp-port=5005      cổng UDP dự phòng; 0 = tắt
  * --record=file.csv    ghi mọi gói CSI nhận được ra CSV (phát lại bằng ReplayMain --file)
  * --event-log=file.csv lịch sử sự kiện (mặc định data/events.csv)
+ * --users=file.csv     tài khoản người giám sát (mặc định data/users.csv, tạo bằng UserAdmin)
+ * --sensor-keys=file   khoá bí mật của từng cảm biến (mặc định data/sensors.csv)
+ * --no-auth            tắt xác thực: ai nối vào cũng được toàn quyền (chỉ để chạy thử)
  * </pre>
+ * UDP không có bước đăng nhập; khi cần chặn cảm biến giả hãy tắt UDP bằng --udp-port=0.
  */
 public final class ServerMain {
     private static final int DEFAULT_UDP_PORT = 5005;
@@ -36,6 +41,14 @@ public final class ServerMain {
         int tcpPort = intArg(args, "--tcp-port", DEFAULT_TCP_PORT);
         String record = stringArg(args, "--record", "");
         Path eventLogPath = Path.of(stringArg(args, "--event-log", "data/events.csv"));
+        boolean noAuth = java.util.Arrays.asList(args).contains("--no-auth");
+        Authenticator authenticator = null;
+        if (noAuth) {
+            System.out.println("CANH BAO: --no-auth, moi may trong mang deu xem va dieu khien duoc");
+        } else {
+            authenticator = Authenticator.load(Path.of(stringArg(args, "--users", "data/users.csv")),
+                    Path.of(stringArg(args, "--sensor-keys", "data/sensors.csv")));
+        }
 
         TcpServer tcpServer = new TcpServer(tcpPort);
         EventLog eventLog = new EventLog(eventLogPath);
@@ -51,7 +64,7 @@ public final class ServerMain {
         loadDetector(sensors, "vn.wisense.detect.breathing.BreathingEstimator");
         loadDetector(sensors, "vn.wisense.detect.fall.FallDetector");
 
-        SensorRegistry registry = new SensorRegistry(tcpServer::broadcastToMonitors);
+        SensorRegistry registry = new SensorRegistry(tcpServer::broadcastSensorStatus);
         CsiIngest ingest = new CsiIngest(sensors::onFrame, registry::touch, record.isBlank() ? null : Path.of(record));
         FallDelivery fallDelivery = new FallDelivery(tcpServer::sessions);
         tcpServer.setFallDelivery(fallDelivery);
@@ -61,7 +74,8 @@ public final class ServerMain {
                 eventLog::recent,
                 sensors::configure,
                 fallDelivery,
-                registry));
+                registry,
+                authenticator));
 
         UdpCsiReceiver udpReceiver = udpPort > 0 ? new UdpCsiReceiver(udpPort, ingest) : null;
         CountDownLatch stopped = new CountDownLatch(1);

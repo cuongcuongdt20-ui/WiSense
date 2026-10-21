@@ -17,3 +17,10 @@ firmware/*/dependencies.lock
 .project
 .classpath
 nbproject/private/
+
+# Bi mat va file sinh ra khi chay (khong commit)
+firmware/*/sdkconfig
+eim_config.toml
+**/data/users.csv
+**/data/sensors.csv
+source/data/

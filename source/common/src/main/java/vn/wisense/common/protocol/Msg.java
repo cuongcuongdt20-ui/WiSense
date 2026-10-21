@@ -17,6 +17,9 @@ import java.util.List;
  * <p>Một server, hai loại client cùng nối vào một cổng và khai báo vai trò trong HELLO:
  * client giám sát (role "monitor", mặc định) và client cảm biến (role "sensor", gửi gói CSI1 nhị phân).
  * Lệnh có thể kèm "req"; câu trả lời mang lại đúng "req" đó để client ghép yêu cầu với câu trả lời.
+ *
+ * <p>Khi server bật xác thực, HELLO được trả bằng CHALLENGE; client gửi AUTH với proof (xem {@code Auth})
+ * rồi mới nhận WELCOME. Sai thì ERROR AUTH_FAILED và server đóng kết nối.
  */
 public final class Msg {
     public static final int VERSION = 1;
@@ -25,8 +28,13 @@ public final class Msg {
     public static final String ROLE_MONITOR = "monitor";
     public static final String ROLE_SENSOR = "sensor";
 
+    // quyền của tài khoản, gửi trong WELCOME
+    public static final String ACCESS_ADMIN = "admin";
+    public static final String ACCESS_VIEWER = "viewer";
+
     // client giám sát → server
     public static final String HELLO = "HELLO";
+    public static final String AUTH = "AUTH";
     public static final String SUBSCRIBE = "SUBSCRIBE";
     public static final String GET_HISTORY = "GET_HISTORY";
     public static final String SET_CONFIG = "SET_CONFIG";
@@ -35,7 +43,24 @@ public final class Msg {
     public static final String PONG = "PONG";
     public static final String BYE = "BYE";
 
+    // client giám sát (admin) → server: quản trị
+    public static final String LIST_SENSORS = "LIST_SENSORS";
+    public static final String NEW_SENSOR_KEY = "NEW_SENSOR_KEY";
+    public static final String DELETE_SENSOR_KEY = "DELETE_SENSOR_KEY";
+    public static final String LIST_USERS = "LIST_USERS";
+    public static final String SAVE_USER = "SAVE_USER";
+    public static final String DELETE_USER = "DELETE_USER";
+    public static final String LIST_SESSIONS = "LIST_SESSIONS";
+    public static final String KICK = "KICK";
+
+    // server → admin: trả lời lệnh quản trị
+    public static final String SENSORS = "SENSORS";
+    public static final String SENSOR_KEY = "SENSOR_KEY";
+    public static final String USERS = "USERS";
+    public static final String SESSIONS = "SESSIONS";
+
     // server → client: trả lời lệnh
+    public static final String CHALLENGE = "CHALLENGE";
     public static final String WELCOME = "WELCOME";
     public static final String OK = "OK";
     public static final String ERROR = "ERROR";
@@ -58,6 +83,10 @@ public final class Msg {
     public static final String SENSOR_OFFLINE = "SENSOR_OFFLINE";
     public static final String DUPLICATE_SENSOR = "DUPLICATE_SENSOR";
     public static final String TIMEOUT = "TIMEOUT";
+    public static final String AUTH_FAILED = "AUTH_FAILED";
+    public static final String FORBIDDEN = "FORBIDDEN";
+    public static final String TOO_MANY_ATTEMPTS = "TOO_MANY_ATTEMPTS";
+    public static final String KICKED = "KICKED";
 
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 
@@ -69,6 +98,96 @@ public final class Msg {
         JsonObject o = of(HELLO);
         o.addProperty("ver", VERSION);
         o.addProperty("name", name);
+        return GSON.toJson(o);
+    }
+
+    /** {"t":"HELLO","ver":1,"name":"ui-1","user":"khanh"}: client giám sát đăng nhập bằng tài khoản user. */
+    public static String hello(String name, String user) {
+        JsonObject o = of(HELLO);
+        o.addProperty("ver", VERSION);
+        o.addProperty("name", name);
+        if (user != null) o.addProperty("user", user);
+        return GSON.toJson(o);
+    }
+
+    /** {"t":"CHALLENGE","nonce":"..","salt":"..","iter":120000}; cảm biến nhận salt rỗng, iter 0. */
+    public static String challenge(String nonce, String salt, int iterations) {
+        JsonObject o = of(CHALLENGE);
+        o.addProperty("nonce", nonce);
+        o.addProperty("salt", salt);
+        o.addProperty("iter", iterations);
+        return GSON.toJson(o);
+    }
+
+    /** {"t":"AUTH","proof":".."} */
+    public static String auth(String proof) {
+        JsonObject o = of(AUTH);
+        o.addProperty("proof", proof);
+        return GSON.toJson(o);
+    }
+
+    /** WELCOME kèm tài khoản đã đăng nhập và quyền (admin/viewer); sensors chỉ gồm cảm biến được xem. */
+    public static String welcome(int session, Collection<Integer> sensors, Collection<Integer> online,
+                                 String user, String access) {
+        JsonObject o = JsonParser.parseString(welcome(session, sensors, online)).getAsJsonObject();
+        if (user != null) o.addProperty("user", user);
+        o.addProperty("access", access);
+        return GSON.toJson(o);
+    }
+
+    /** Lệnh quản trị chỉ có loại tin và req: LIST_SENSORS, LIST_USERS, LIST_SESSIONS. */
+    public static String request(String type, long req) {
+        JsonObject o = of(type);
+        o.addProperty("req", req);
+        return GSON.toJson(o);
+    }
+
+    /** Lệnh quản trị kèm một số nguyên: NEW_SENSOR_KEY/DELETE_SENSOR_KEY {sensor}, KICK {session}. */
+    public static String request(String type, long req, String key, long value) {
+        JsonObject o = of(type);
+        o.addProperty("req", req);
+        o.addProperty(key, value);
+        return GSON.toJson(o);
+    }
+
+    /** {"t":"DELETE_USER","req":3,"user":"me"} */
+    public static String deleteUser(long req, String user) {
+        JsonObject o = of(DELETE_USER);
+        o.addProperty("req", req);
+        o.addProperty("user", user);
+        return GSON.toJson(o);
+    }
+
+    /**
+     * {"t":"SAVE_USER","user":"me","access":"viewer","sensors":[1]|"*","salt":"..","iter":120000,"key":".."}.
+     * Client tính salt và key từ mật khẩu, nên mật khẩu mới cũng không đi trên mạng.
+     */
+    public static String saveUser(long req, String user, String access, Collection<Integer> sensors,
+                                  String salt, int iterations, String key) {
+        JsonObject o = of(SAVE_USER);
+        o.addProperty("req", req);
+        o.addProperty("user", user);
+        o.addProperty("access", access);
+        if (sensors == null) o.addProperty("sensors", "*");
+        else o.add("sensors", ints(sensors));
+        o.addProperty("salt", salt);
+        o.addProperty("iter", iterations);
+        o.addProperty("key", key);
+        return GSON.toJson(o);
+    }
+
+    /** {"t":"SENSOR_KEY","sensor":1,"secret":".."}: khoá mới, chỉ gửi cho admin vừa yêu cầu. */
+    public static String sensorKey(int sensor, String secret) {
+        JsonObject o = of(SENSOR_KEY);
+        o.addProperty("sensor", sensor);
+        o.addProperty("secret", secret);
+        return GSON.toJson(o);
+    }
+
+    /** Bọc danh sách object vào một tin: {"t":type,field:[...]}. */
+    public static String list(String type, String field, JsonArray items) {
+        JsonObject o = of(type);
+        o.add(field, items);
         return GSON.toJson(o);
     }
 

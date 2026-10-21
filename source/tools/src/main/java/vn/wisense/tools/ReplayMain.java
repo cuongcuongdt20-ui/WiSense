@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
+import vn.wisense.common.auth.Credentials;
 import vn.wisense.common.protocol.FrameCodec;
 import vn.wisense.common.protocol.Msg;
 
@@ -26,11 +27,13 @@ import vn.wisense.common.protocol.Msg;
  * HELLO role=sensor, gửi khung nhị phân CSI1, nhận CONFIG từ server thì đổi tốc độ phát và trả CONFIG_OK.
  *
  * <pre>
- * java -jar wisense-tools.jar --tcp                          # cảm biến 1, tín hiệu tổng hợp, TCP 127.0.0.1:7000
- * java -jar wisense-tools.jar --tcp --sensor=2 --target=192.168.1.10
+ * java -jar wisense-tools.jar --tcp --key=...                # cảm biến 1, tín hiệu tổng hợp, TCP 127.0.0.1:7000
+ * java -jar wisense-tools.jar --tcp --sensor=2 --key=... --target=192.168.1.10
  * java -jar wisense-tools.jar --tcp --file=data/fall_01.csv
  * java -jar wisense-tools.jar                                # UDP 127.0.0.1:5005 như cũ
  * </pre>
+ * --key là khoá bí mật của cảm biến trong data/sensors.csv của server (tạo bằng UserAdmin --add-sensor);
+ * server chạy --no-auth thì không cần.
  */
 public final class ReplayMain {
     private static final int DEFAULT_UDP_PORT = 5005;
@@ -60,7 +63,8 @@ public final class ReplayMain {
             throw new IllegalArgumentException("Invalid port, interval, duration or sensor");
 
         long endNanos = durationSeconds == 0 ? Long.MAX_VALUE : System.nanoTime() + durationSeconds * 1_000_000_000L;
-        try (Sender sender = tcp ? new TcpSender(host, port) : udpSender(host, port)) {
+        String key = stringArg(args, "--key", "");
+        try (Sender sender = tcp ? new TcpSender(host, port, key) : udpSender(host, port)) {
             System.out.printf("Replaying CSI to %s %s:%d every %d ms%s%n", tcp ? "TCP" : "UDP", host, port, intervalMs,
                     file.isBlank() ? " (synthetic signal, sensor " + sensor + ")" : " from " + file);
             if (!file.isBlank()) replayCsv(sender, endNanos, Path.of(file));
@@ -89,12 +93,14 @@ public final class ReplayMain {
     private static final class TcpSender implements Sender {
         private final String host;
         private final int port;
+        private final String key;                       // rỗng: server không bật xác thực
         private Socket socket;
         private DataOutputStream out;
 
-        TcpSender(String host, int port) {
+        TcpSender(String host, int port, String key) {
             this.host = host;
             this.port = port;
+            this.key = key;
         }
 
         @Override public synchronized void send(byte[] packet) throws IOException {
@@ -109,6 +115,12 @@ public final class ReplayMain {
             out = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
             FrameCodec.writeFrame(out, Msg.helloSensor(sensor));
             JsonObject reply = Msg.parse(FrameCodec.readFrame(in));
+            if (reply != null && Msg.CHALLENGE.equals(Msg.type(reply))) {
+                if (key.isBlank()) throw new IOException("Server yeu cau xac thuc: chay voi --key=<khoa cam bien " + sensor + ">");
+                String proof = Credentials.sensor(key).answer(reply.get("nonce").getAsString(), "", 0);
+                FrameCodec.writeFrame(out, Msg.auth(proof));
+                reply = Msg.parse(FrameCodec.readFrame(in));
+            }
             if (reply == null || !Msg.WELCOME.equals(Msg.type(reply)))
                 throw new IOException("Server tu choi cam bien " + sensor + ": " + reply);
             System.out.println("Da dang ki cam bien " + sensor + " voi server qua TCP");

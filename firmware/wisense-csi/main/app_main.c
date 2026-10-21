@@ -24,6 +24,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "mbedtls/md.h"
 #include "ping/ping_sock.h"
 #include "wisense_net.h"
 
@@ -172,31 +173,66 @@ static void recv_task(void *arg) {
     vTaskDelete(NULL);
 }
 
+// Trả lời CHALLENGE: proof = hex(HMAC-SHA256(khoá cảm biến, chuỗi nonce)), cùng phép tính với Auth.proof bên Java.
+// Ghi tin AUTH vào out; trả về độ dài, hoặc -1 nếu tin không có nonce hợp lệ.
+static int build_auth(const char *challenge, char *out, size_t cap) {
+    const char *p = strstr(challenge, "\"nonce\":\"");
+    if (!p) return -1;
+    p += strlen("\"nonce\":\"");
+    const char *end = strchr(p, '"');
+    if (!end || end - p > 64) return -1;
+    uint8_t mac[32];
+    const char *key = CONFIG_WS_SENSOR_KEY;
+    if (mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), (const unsigned char *) key, strlen(key),
+                        (const unsigned char *) p, (size_t) (end - p), mac) != 0) return -1;
+    char hex[65];
+    for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", mac[i]);
+    return snprintf(out, cap, "{\"t\":\"AUTH\",\"proof\":\"%s\"}", hex);
+}
+
 // Kết nối và đăng kí với server; thử lại mỗi 2 giây tới khi được WELCOME. Trả về socket đã đăng kí.
+// Server bật xác thực thì HELLO được trả CHALLENGE: gửi AUTH rồi mới nhận WELCOME.
 static int tcp_register(void) {
     char hello[96];
     int n = snprintf(hello, sizeof(hello), "{\"t\":\"HELLO\",\"ver\":1,\"role\":\"sensor\",\"sensor\":%d}",
                      CONFIG_WS_SENSOR_ID);
     for (;;) {
+        int wait_ms = 2000;
         int sock = ws_tcp_connect(CONFIG_WS_SERVER_HOST, CONFIG_WS_SERVER_TCP_PORT);
         if (sock >= 0 && ws_send_frame(sock, hello, (size_t) n) == 0) {
             uint8_t buf[256];
             int len = ws_recv_frame(sock, buf, sizeof(buf) - 1);
             if (len > 0) {
                 buf[len] = 0;
+                if (strstr((const char *) buf, "\"CHALLENGE\"")) {
+                    char auth[128];
+                    int an = build_auth((const char *) buf, auth, sizeof(auth));
+                    if (an > 0 && ws_send_frame(sock, auth, (size_t) an) == 0) {
+                        len = ws_recv_frame(sock, buf, sizeof(buf) - 1);
+                        if (len > 0) buf[len] = 0;
+                    } else {
+                        len = -1;
+                    }
+                }
+            }
+            if (len > 0) {
                 if (strstr((const char *) buf, "\"WELCOME\"")) {
                     ESP_LOGI(TAG, "da dang ki cam bien %d voi server %s:%d", CONFIG_WS_SENSOR_ID,
                              CONFIG_WS_SERVER_HOST, CONFIG_WS_SERVER_TCP_PORT);
                     xTaskCreate(recv_task, "recv", 3072, (void *) (intptr_t) sock, 5, NULL);
                     return sock;
                 }
-                ESP_LOGE(TAG, "server tu choi: %s", (const char *) buf);   // ví dụ DUPLICATE_SENSOR
+                ESP_LOGE(TAG, "server tu choi: %s", (const char *) buf);   // DUPLICATE_SENSOR, AUTH_FAILED...
+                if (strstr((const char *) buf, "AUTH_FAILED") || strstr((const char *) buf, "TOO_MANY_ATTEMPTS")) {
+                    ESP_LOGE(TAG, "kiem tra WS_SENSOR_KEY trong menuconfig khop voi data/sensors.csv cua server");
+                    wait_ms = 30000;                  // thử dồn dập sẽ bị server chặn theo IP
+                }
             }
         }
         if (sock >= 0) close(sock);
-        ESP_LOGW(TAG, "chua ket noi duoc server TCP %s:%d, thu lai sau 2 giay", CONFIG_WS_SERVER_HOST,
-                 CONFIG_WS_SERVER_TCP_PORT);
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        ESP_LOGW(TAG, "chua dang ki duoc voi server TCP %s:%d, thu lai sau %d giay", CONFIG_WS_SERVER_HOST,
+                 CONFIG_WS_SERVER_TCP_PORT, wait_ms / 1000);
+        vTaskDelay(pdMS_TO_TICKS(wait_ms));
     }
 }
 #endif

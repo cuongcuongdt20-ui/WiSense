@@ -107,7 +107,10 @@ Gói CSI1 (big-endian; đi qua TCP thành nội dung một khung, qua UDP 5005 t
 **Client cảm biến ↔ server:**
 
 ```json
-{"t":"HELLO","ver":1,"role":"sensor","sensor":1}     ← cảm biến đăng kí; server trả WELCOME hoặc ERROR DUPLICATE_SENSOR
+{"t":"HELLO","ver":1,"role":"sensor","sensor":1}     ← cảm biến đăng kí
+{"t":"CHALLENGE","nonce":"9f2c…","salt":"","iter":0} ← server bật xác thực (mặc định)
+{"t":"AUTH","proof":"5bdc…"}                         ← HMAC-SHA256(khoá cảm biến, nonce)
+                                                     ← server trả WELCOME, hoặc ERROR AUTH_FAILED / DUPLICATE_SENSOR rồi đóng
 … các khung nhị phân CSI1 …
 {"t":"CONFIG","req":9,"pingHz":50}                  ← server ra lệnh
 {"t":"CONFIG_OK","req":9,"pingHz":50}               ← cảm biến đã áp dụng
@@ -116,7 +119,8 @@ Gói CSI1 (big-endian; đi qua TCP thành nội dung một khung, qua UDP 5005 t
 **Client giám sát gửi lên** (lệnh nào cũng kèm được `"req":n`; câu trả lời, kể cả ERROR, mang lại đúng `req` đó):
 
 ```json
-{"t":"HELLO","ver":1,"name":"ui-may1-1234"}
+{"t":"HELLO","ver":1,"name":"ui-may1-1234","user":"khanh"}
+{"t":"AUTH","proof":"…"}                              ← trả lời CHALLENGE {nonce, salt, iter}
 {"t":"SUBSCRIBE","sensors":[1],"signal":true}
 {"t":"GET_HISTORY","req":3,"sensor":1,"limit":50}
 {"t":"SET_CONFIG","sensor":1,"key":"motionThr","value":0.4}
@@ -129,14 +133,15 @@ Gói CSI1 (big-endian; đi qua TCP thành nội dung một khung, qua UDP 5005 t
 **Server trả lời lệnh:**
 
 ```json
-{"t":"WELCOME","session":7,"sensors":[1,2],"online":[1]}
+{"t":"CHALLENGE","nonce":"…","salt":"…","iter":120000}
+{"t":"WELCOME","session":7,"sensors":[1,2],"online":[1],"user":"khanh","access":"admin"}
 {"t":"OK","re":"SUBSCRIBE"}
 {"t":"OK","re":"SET_SENSOR","pingHz":50,"req":5}
 {"t":"ERROR","code":"SENSOR_OFFLINE","msg":"...","req":5}
 {"t":"HISTORY","sensor":1,"events":[{"t":"FALL",...},{"t":"BREATH",...}],"req":3}
 ```
 
-**Server đẩy xuống client giám sát:** các sự kiện của cảm biến chỉ gửi cho client đã SUBSCRIBE cảm biến đó; `SENSOR_STATUS` và `PING` gửi cho mọi client giám sát.
+**Server đẩy xuống client giám sát:** các sự kiện của cảm biến chỉ gửi cho client đã SUBSCRIBE cảm biến đó; `SENSOR_STATUS` gửi cho mọi client giám sát được xem cảm biến đó; `PING` gửi cho mọi client giám sát.
 
 ```json
 {"t":"MOTION","sensor":1,"level":0.73,"moving":true,"ts":1760000000456}
@@ -150,15 +155,31 @@ Gói CSI1 (big-endian; đi qua TCP thành nội dung một khung, qua UDP 5005 t
 
 **Quy tắc:**
 
-- **Trạng thái phiên:** `CONNECTED → AUTHED` (sau HELLO) `→ SUBSCRIBED → CLOSED`. Lệnh gửi trước HELLO thì nhận `INVALID_STATE`. Client cảm biến chỉ được gửi `CONFIG_OK`, `PONG`, `BYE` (ngoài các khung CSI); client giám sát không được gửi khung nhị phân.
+- **Xác thực (challenge–response):** HELLO được trả bằng `CHALLENGE` với `nonce` ngẫu nhiên mới mỗi lần; client gửi `AUTH {proof = HMAC-SHA256(key, nonce)}`.
+  - Người dùng: `key = PBKDF2-HMAC-SHA256(mật khẩu, salt, iter)`. Server chỉ lưu `key` trong `data/users.csv`, không lưu mật khẩu, và mật khẩu không bao giờ đi trên mạng.
+  - Cảm biến: `key` = khoá bí mật trong `data/sensors.csv`, nạp vào ESP32 qua `WS_SENSOR_KEY`.
+  - `proof` cũ gửi lại không dùng được vì `nonce` đã khác (chống replay). Tài khoản không tồn tại vẫn nhận `CHALLENGE` (salt giả) để không dò được tên.
+  - Một IP sai 5 lần trong 60 giây thì bị chặn 60 giây (`TOO_MANY_ATTEMPTS`).
+  - Chạy server với `--no-auth` thì bỏ bước này: HELLO nhận WELCOME ngay, toàn quyền.
+- **Phân quyền:** `admin` được xem và điều khiển (`SET_CONFIG`, `SET_SENSOR`); `viewer` chỉ được xem. Mỗi tài khoản chỉ thấy các cảm biến được cấp (`WELCOME.sensors`, `SENSOR_STATUS`); `SUBSCRIBE`, `GET_HISTORY` hay lệnh điều khiển trên cảm biến khác nhận `FORBIDDEN` (giữ kết nối).
+- **Lệnh quản trị** (chỉ `admin`, client có cửa sổ "Quản trị"; viewer nhận `FORBIDDEN`):
+  - `LIST_SENSORS` → `SENSORS {sensors:[{sensor, online, tcp, key}]}`; `NEW_SENSOR_KEY {sensor}` → `SENSOR_KEY {sensor, secret}` (cảm biến đang nối bằng khoá cũ bị ngắt); `DELETE_SENSOR_KEY {sensor}`.
+  - `LIST_USERS` → `USERS`; `SAVE_USER {user, access, sensors, salt, iter, key}` (client băm mật khẩu, server không nhận mật khẩu); `DELETE_USER {user}`. Phiên đang mở của tài khoản bị sửa hoặc xoá nhận `ERROR KICKED` rồi bị đóng. Không tự xoá mình, không hạ quyền admin cuối cùng.
+  - `LIST_SESSIONS` → `SESSIONS {sessions:[{session, role, name, user, address, state}]}`; `KICK {session}` ngắt một kết nối.
+  - Thay đổi được ghi ngay vào `data/users.csv`, `data/sensors.csv`, không cần khởi động lại server.
+- **Trạng thái phiên:** `CONNECTED → CHALLENGED` (sau HELLO) `→ AUTHED` (sau AUTH đúng) `→ SUBSCRIBED → CLOSED`. Lệnh gửi trước khi đăng nhập xong thì nhận `INVALID_STATE`. Client cảm biến chỉ được gửi `CONFIG_OK`, `PONG`, `BYE` (ngoài các khung CSI); client giám sát không được gửi khung nhị phân.
 - **Mã lỗi:**
   - `BAD_JSON`: không parse được hoặc thiếu `t`;
   - `UNKNOWN_TYPE`, `INVALID_STATE`, `BAD_ARG`;
   - `SENSOR_OFFLINE`: cảm biến không nối TCP;
   - `DUPLICATE_SENSOR`: mã cảm biến đang có người dùng; server gửi lỗi rồi đóng kết nối;
-  - `TIMEOUT`: cảm biến không trả `CONFIG_OK` trong 3 giây.
+  - `TIMEOUT`: cảm biến không trả `CONFIG_OK` trong 3 giây;
+  - `AUTH_FAILED`: sai tài khoản, mật khẩu hoặc khoá cảm biến; server gửi lỗi rồi đóng kết nối;
+  - `TOO_MANY_ATTEMPTS`: IP đang bị chặn vì sai nhiều lần; server gửi lỗi rồi đóng kết nối;
+  - `FORBIDDEN`: tài khoản không có quyền với lệnh hoặc cảm biến đó;
+  - `KICKED`: admin ngắt phiên này, hoặc tài khoản/khoá vừa bị đổi; server gửi lỗi rồi đóng, client không tự nối lại.
   
-  Lỗi lệnh thì trả ERROR và **giữ kết nối**. Chỉ khi độ dài khung sai mới đóng, vì luồng byte đã lệch.
+  Lỗi lệnh thì trả ERROR và **giữ kết nối**. Chỉ đóng khi độ dài khung sai (luồng byte đã lệch), khi đăng nhập sai và khi trùng mã cảm biến.
 - **Cảm biến online/offline:** online khi có khung CSI trong 5 giây gần nhất; cảm biến TCP đóng kết nối thì offline ngay. Mỗi lần đổi trạng thái, server đẩy `SENSOR_STATUS`.
 - **FALL** có `id` (bắt đầu từ giờ hệ thống, nên không lặp lại khi server khởi động lại) và `ts`. Client trả ACK cho mọi bản nhận được, kể cả bản gửi lại, và chỉ báo một lần cho mỗi `id`. Server gửi lại sau 3 giây, tối đa 5 lần; client HELLO lại cùng `name` thì nhận ngay các FALL còn chờ.
 - **Giữ kết nối:** server gửi PING cho client giám sát mỗi 5 giây; hai phía coi là rớt nếu 15 giây không có tin. Client chờ 2 giây rồi nối lại, gửi lại HELLO và SUBSCRIBE. Cảm biến không nhận PING: dòng CSI liên tục đã cho biết nó còn sống.
@@ -186,14 +207,25 @@ mvn clean verify
 
 Lệnh trên chạy được ngay trên khung rỗng và tải sẵn các thư viện về máy.
 
+Tạo tài khoản và khoá cảm biến **một lần** trên máy server (chạy trong `source/`, ghi vào `data/users.csv` và `data/sensors.csv`; hai file này chứa bí mật, đã có trong `.gitignore`):
+
+```bash
+java -cp tools/target/wisense-tools.jar vn.wisense.tools.UserAdmin --add=khanh --access=admin         # hỏi mật khẩu
+java -cp tools/target/wisense-tools.jar vn.wisense.tools.UserAdmin --add=khach --access=viewer --see=1
+java -cp tools/target/wisense-tools.jar vn.wisense.tools.UserAdmin --add-sensor=1    # in khoá của cảm biến 1
+java -cp tools/target/wisense-tools.jar vn.wisense.tools.UserAdmin --list
+```
+
 Chạy hệ thống **không cần ESP32** (chạy trong `source/`):
 
 ```bash
-java -jar server/target/wisense-server.jar                       # TCP 7000 (+ UDP 5005 dự phòng; --udp-port=0 để tắt)
-java -jar tools/target/wisense-tools.jar --tcp                    # giả làm cảm biến 1 qua TCP, tín hiệu tổng hợp
-java -jar tools/target/wisense-tools.jar --tcp --sensor=2         # thêm cảm biến 2
-java -jar client/target/wisense-client.jar                        # client giám sát; mở nhiều cửa sổ được
+java -jar server/target/wisense-server.jar --udp-port=0          # TCP 7000, bắt buộc đăng nhập (UDP không xác thực nên tắt)
+java -jar tools/target/wisense-tools.jar --tcp --key=<khoá cảm biến 1>          # giả làm cảm biến 1 qua TCP
+java -jar tools/target/wisense-tools.jar --tcp --sensor=2 --key=<khoá cảm biến 2>
+java -jar client/target/wisense-client.jar                       # màn đăng nhập: server, cổng, tài khoản, mật khẩu
 ```
+
+Chạy thử nhanh không cần tài khoản: thêm `--no-auth` cho server, bỏ `--key` ở cảm biến; màn đăng nhập nhận mật khẩu bất kỳ. Đo tải có đăng nhập: `LoadTestClient ... --user=khanh --password=...`.
 
 Ghi dữ liệu thật từ ESP32 rồi phát lại:
 

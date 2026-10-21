@@ -25,6 +25,14 @@ menu "WiSense"
         depends on WS_TRANSPORT_TCP
         default 7000
 
+    config WS_SENSOR_KEY
+        string "Sensor key (khoa xac thuc)"
+        depends on WS_TRANSPORT_TCP
+        default ""
+        help
+            Khoa bi mat cua cam bien, lay tu lenh UserAdmin --add-sensor=<id> tren may server
+            (luu trong data/sensors.csv). Server chay --no-auth thi de trong.
+
     config WS_SERVER_PORT
         int "Server UDP port"
         depends on WS_TRANSPORT_UDP

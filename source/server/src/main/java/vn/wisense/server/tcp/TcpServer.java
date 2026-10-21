@@ -124,6 +124,19 @@ public final class TcpServer implements AutoCloseable {
         }
     }
 
+    /** SENSOR_STATUS: chỉ gửi cho người giám sát có quyền xem cảm biến đó. */
+    public void broadcastSensorStatus(String json) {
+        com.google.gson.JsonObject o = Msg.parse(json);
+        if (o == null || !o.has("sensor")) {
+            broadcastToMonitors(json);
+            return;
+        }
+        int sensor = o.get("sensor").getAsInt();
+        for (ClientSession client : clients) {
+            if (client.canSee(sensor)) client.enqueueJson(json);
+        }
+    }
+
     private void broadcastEvent(int sensor, String type, String json) {
         for (ClientSession client : clients) {
             if (client.wantsEvent(sensor, type)) client.enqueueJson(json);

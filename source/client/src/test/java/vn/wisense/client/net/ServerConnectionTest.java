@@ -1,7 +1,10 @@
 package vn.wisense.client.net;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.gson.JsonObject;
 import java.io.DataInputStream;
@@ -14,6 +17,8 @@ import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import vn.wisense.common.auth.Auth;
+import vn.wisense.common.auth.Credentials;
 import vn.wisense.common.protocol.FrameCodec;
 import vn.wisense.common.protocol.Msg;
 
@@ -143,6 +148,54 @@ class ServerConnectionTest {
             p.sync();                                            // tin kế tiếp là PONG, tức là không có ACK
             assertEquals(2, drain(inbox, Message.Fall.class).size());
             conn.stop();
+        }
+    }
+
+    @Test
+    void traLoiChallengeBangProofDungRoiDangKy() throws IOException {
+        ConcurrentLinkedQueue<Message> inbox = new ConcurrentLinkedQueue<>();
+        byte[] salt = Auth.randomBytes(Auth.SALT_BYTES);
+        byte[] key = Auth.deriveKey("admin-pass".toCharArray(), salt, 1000);
+        try (ServerSocket ss = new ServerSocket(0)) {
+            ServerConnection conn = new ServerConnection("127.0.0.1", ss.getLocalPort(), "ui-test",
+                    Credentials.user("khanh", "admin-pass".toCharArray()), inbox, ok -> { });
+            conn.start();
+            Peer p = Peer.accept(ss);
+            JsonObject hello = p.read();
+            assertEquals("khanh", hello.get("user").getAsString());
+            String nonce = Auth.newNonce();
+            p.write(Msg.challenge(nonce, Auth.hex(salt), 1000));
+            JsonObject auth = p.read();
+            assertEquals(Msg.AUTH, Msg.type(auth));
+            assertTrue(Auth.verify(key, nonce, auth.get("proof").getAsString()));
+            assertFalse(auth.toString().contains("admin-pass"));   // mật khẩu không đi trên mạng
+            p.write(Msg.welcome(3, List.of(1), List.of(1), "khanh", Msg.ACCESS_VIEWER));
+            assertEquals(Msg.SUBSCRIBE, Msg.type(p.read()));
+            p.sync();
+            Message.Welcome w = drain(inbox, Message.Welcome.class).get(0);
+            assertEquals("khanh", w.user());
+            assertFalse(w.isAdmin());
+            conn.stop();
+        }
+    }
+
+    @Test
+    void authFailedThiDungKhongNoiLai() throws Exception {
+        ConcurrentLinkedQueue<Message> inbox = new ConcurrentLinkedQueue<>();
+        try (ServerSocket ss = new ServerSocket(0)) {
+            ServerConnection conn = new ServerConnection("127.0.0.1", ss.getLocalPort(), "ui-test",
+                    Credentials.user("khanh", "wrong".toCharArray()), inbox, ok -> { });
+            conn.start();
+            Peer p = Peer.accept(ss);
+            p.read();                                            // HELLO
+            p.write(Msg.challenge(Auth.newNonce(), Auth.hex(Auth.randomBytes(16)), 1000));
+            p.read();                                            // AUTH
+            p.write(Msg.error(Msg.AUTH_FAILED, "Wrong user, password or sensor key"));
+            p.socket().close();
+            Thread.sleep(2500);                                  // quá thời gian chờ nối lại 2 giây
+            ss.setSoTimeout(500);
+            assertThrows(java.net.SocketTimeoutException.class, ss::accept);   // không nối lại
+            assertEquals(Msg.AUTH_FAILED, drain(inbox, Message.ServerError.class).get(0).code());
         }
     }
 

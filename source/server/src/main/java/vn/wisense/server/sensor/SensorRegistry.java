@@ -156,6 +156,13 @@ public final class SensorRegistry implements AutoCloseable {
         return ids;
     }
 
+    /** Cảm biến đang có kết nối TCP còn mở (điều khiển được bằng SET_SENSOR). */
+    public boolean isTcp(int sensor) {
+        Entry e = sensors.get(sensor);
+        Link link = e == null ? null : e.link;
+        return link != null && link.isOpen();
+    }
+
     /** Số lệnh đang chờ cảm biến trả lời (để test). */
     int pendingCount() {
         return pending.size();

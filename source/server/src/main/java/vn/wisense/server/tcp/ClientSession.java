@@ -16,6 +16,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import vn.wisense.common.protocol.FrameCodec;
 import vn.wisense.common.protocol.Msg;
+import vn.wisense.server.auth.Access;
+import vn.wisense.server.auth.Authenticator;
 import vn.wisense.server.sensor.SensorRegistry;
 
 /**
@@ -24,8 +26,11 @@ import vn.wisense.server.sensor.SensorRegistry;
  * Cảm biến được gửi khung nhị phân CSI1; người giám sát chỉ được gửi khung JSON.
  */
 public final class ClientSession implements AutoCloseable, FallDelivery.Recipient, SensorRegistry.Link {
-    public enum State { CONNECTED, AUTHED, SUBSCRIBED, CLOSED }
+    /** CHALLENGED: đã HELLO, đang chờ AUTH (chỉ khi server bật xác thực). */
+    public enum State { CONNECTED, CHALLENGED, AUTHED, SUBSCRIBED, CLOSED }
     public enum Role { UNKNOWN, MONITOR, SENSOR }
+    /** HELLO đã nhận, chờ AUTH: vai trò, tên hoặc mã cảm biến đã khai, và CHALLENGE đã gửi. */
+    record PendingAuth(Role role, String name, int sensor, Authenticator.Challenge challenge) {}
     private static final int OUTGOING_QUEUE_CAPACITY = 256;
     /** Tin đánh dấu cuối hàng đợi: luồng ghi gặp nó thì đóng kết nối (đóng sau khi đã gửi hết). */
     private static final String CLOSE_MARK = new String("<close>");
@@ -44,6 +49,8 @@ public final class ClientSession implements AutoCloseable, FallDelivery.Recipien
     private volatile String name;
     private volatile boolean wantSignal;
     private volatile int sensorId = -1;
+    private volatile Access access = Access.ALL;
+    private volatile PendingAuth pending;
 
     ClientSession(Socket socket, TcpServer owner, CommandHandler handler, int sessionId) throws IOException {
         this.socket = socket;
@@ -127,11 +134,39 @@ public final class ClientSession implements AutoCloseable, FallDelivery.Recipien
     boolean isSensor() { return role == Role.SENSOR; }
     int sensorId() { return sensorId; }
 
-    /** HELLO của client giám sát. */
-    void authenticate(String clientName) {
+    /** Địa chỉ IP của client, dùng để đếm số lần đăng nhập sai. */
+    String remoteAddress() { return socket.getInetAddress().getHostAddress(); }
+
+    /** Đã gửi CHALLENGE, chờ AUTH. */
+    void challenge(PendingAuth p) {
+        pending = p;
+        state = State.CHALLENGED;
+    }
+
+    /** Lấy và xoá lần bắt tay đang chờ: mỗi CHALLENGE chỉ được trả lời một lần. */
+    PendingAuth takePending() {
+        PendingAuth p = pending;
+        pending = null;
+        return p;
+    }
+
+    /** Client giám sát đã đăng nhập (hoặc HELLO khi server không bật xác thực). */
+    void authenticate(String clientName, Access rights) {
         name = clientName;
+        access = rights;
         role = Role.MONITOR;
         state = State.AUTHED;
+    }
+
+    Access access() { return access; }
+
+    /** Server chứa phiên này (lệnh quản trị cần danh sách mọi phiên). */
+    TcpServer server() { return owner; }
+
+    /** Admin ngắt phiên này: báo lí do rồi đóng sau khi gửi xong. */
+    void kick(String reason) {
+        send(Msg.error(Msg.KICKED, reason));
+        closeAfterFlush();
     }
 
     /** HELLO của client cảm biến (đã được SensorRegistry chấp nhận mã này). */
@@ -155,6 +190,8 @@ public final class ClientSession implements AutoCloseable, FallDelivery.Recipien
     boolean isSubscribed() { return state == State.SUBSCRIBED; }
     /** Client giám sát đã HELLO: được nhận PING và SENSOR_STATUS. */
     boolean isMonitor() { return role == Role.MONITOR && !closed.get(); }
+    /** Client giám sát được xem cảm biến này: nhận SENSOR_STATUS của nó. */
+    boolean canSee(int sensor) { return isMonitor() && access.canSee(sensor); }
     @Override public String name() { return name; }
     @Override public boolean wants(int sensor) { return isSubscribed() && sensors.contains(sensor); }
     @Override public boolean isOpen() { return !closed.get(); }
