@@ -1,19 +1,28 @@
-// Firmware thật cho ESP32-S3: lấy CSI rồi gửi về server qua UDP theo hợp đồng "CSI1".
-// Cấu hình bằng idf.py menuconfig → WiSense. Có hai nguồn CSI:
+// Firmware thật cho ESP32-S3: lấy CSI rồi gửi về server theo hợp đồng "CSI1".
+// Cấu hình bằng idf.py menuconfig → WiSense. Hai cách gửi:
+//  - TCP (mặc định): ESP32 là client cảm biến của server. Kết nối, gửi HELLO role=sensor, chờ WELCOME, rồi gửi
+//    mỗi gói CSI1 thành một khung (4 byte độ dài + gói). Một task riêng nhận lệnh CONFIG từ server (đổi tần số
+//    ping) và trả CONFIG_OK. Mất kết nối thì tự nối lại.
+//  - UDP (dự phòng): gửi một chiều tới cổng UDP của server như bản cũ.
+// Có hai nguồn CSI:
 //  - ROUTER (mặc định, chỉ cần 1 board): theo ví dụ csi_recv_router của esp-csi. Board nối router,
 //    ping gateway WS_PING_HZ lần/giây; CSI lấy từ gói trả lời của router (lọc theo BSSID).
 //  - ESPNOW (2 board): theo ví dụ csi_recv của esp-csi. Nhận gói ESP-NOW của con phát chạy csi_send
 //    (lọc theo MAC). Con phát phải phát đúng kênh của router: xem dòng log "kenh router".
 #include <math.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "ping/ping_sock.h"
 #include "wisense_net.h"
@@ -95,9 +104,110 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info) {
     if (xQueueSend(s_queue, &item, 0) != pdTRUE) s_dropped++;   // đầy thì bỏ, không chặn task Wi-Fi
 }
 
+#if CONFIG_WS_SOURCE_ROUTER
+static esp_ping_handle_t s_ping;                    // phiên ping hiện tại, đổi được khi server gửi CONFIG
+
+// Tạo lưu lượng đều để router trả lời liên tục, mỗi gói trả lời cho một khung CSI (như csi_recv_router).
+// Gọi lại với hz khác thì dừng phiên cũ và mở phiên mới.
+static void ping_gateway_set_hz(int hz) {
+    if (s_ping) {
+        esp_ping_stop(s_ping);
+        esp_ping_delete_session(s_ping);
+        s_ping = NULL;
+    }
+    esp_netif_ip_info_t ip;
+    esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), &ip);
+    esp_ping_config_t pc = ESP_PING_DEFAULT_CONFIG();
+    pc.count = ESP_PING_COUNT_INFINITE;
+    pc.interval_ms = 1000 / hz;
+    pc.task_stack_size = 3072;
+    pc.data_size = 1;
+    pc.target_addr.u_addr.ip4.addr = ip4_addr_get_u32(&ip.gw);
+    pc.target_addr.type = ESP_IPADDR_TYPE_V4;
+    esp_ping_callbacks_t cbs = {0};
+    ESP_ERROR_CHECK(esp_ping_new_session(&pc, &cbs, &s_ping));
+    ESP_ERROR_CHECK(esp_ping_start(s_ping));
+    ESP_LOGI(TAG, "ping gateway " IPSTR " %d lan/giay", IP2STR(&ip.gw), hz);
+}
+#endif
+
+#if CONFIG_WS_TRANSPORT_TCP
+static SemaphoreHandle_t s_tx_lock;                 // send_task gửi CSI, recv_task gửi CONFIG_OK: khoá để khung không xen nhau
+
+static int send_frame_locked(int sock, const void *data, size_t len) {
+    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+    int r = ws_send_frame(sock, data, len);
+    xSemaphoreGive(s_tx_lock);
+    return r;
+}
+
+// Lấy số nguyên sau "key": trong một tin JSON ngắn; không có thì trả -1. Tin từ server do server tự tạo nên đủ dùng.
+static long json_long(const char *json, const char *key) {
+    const char *p = strstr(json, key);
+    if (!p) return -1;
+    return strtol(p + strlen(key), NULL, 10);
+}
+
+// Nhận lệnh từ server trên một kết nối; kết nối đóng (send_task đóng hoặc server ngắt) thì task tự kết thúc.
+static void recv_task(void *arg) {
+    int sock = (int) (intptr_t) arg;
+    uint8_t buf[256];
+    for (;;) {
+        int len = ws_recv_frame(sock, buf, sizeof(buf) - 1);
+        if (len < 0) break;
+        buf[len] = 0;
+        const char *json = (const char *) buf;
+        if (!strstr(json, "\"t\":\"CONFIG\"")) continue;
+        long req = json_long(json, "\"req\":");
+        long hz = json_long(json, "\"pingHz\":");
+        if (hz < 1 || hz > 200) continue;
+#if CONFIG_WS_SOURCE_ROUTER
+        ping_gateway_set_hz((int) hz);
+#endif
+        char ok[96];
+        int n = snprintf(ok, sizeof(ok), "{\"t\":\"CONFIG_OK\",\"req\":%ld,\"pingHz\":%ld}", req, hz);
+        send_frame_locked(sock, ok, (size_t) n);
+        ESP_LOGI(TAG, "server yeu cau %ld lan ping/giay: da ap dung", hz);
+    }
+    vTaskDelete(NULL);
+}
+
+// Kết nối và đăng kí với server; thử lại mỗi 2 giây tới khi được WELCOME. Trả về socket đã đăng kí.
+static int tcp_register(void) {
+    char hello[96];
+    int n = snprintf(hello, sizeof(hello), "{\"t\":\"HELLO\",\"ver\":1,\"role\":\"sensor\",\"sensor\":%d}",
+                     CONFIG_WS_SENSOR_ID);
+    for (;;) {
+        int sock = ws_tcp_connect(CONFIG_WS_SERVER_HOST, CONFIG_WS_SERVER_TCP_PORT);
+        if (sock >= 0 && ws_send_frame(sock, hello, (size_t) n) == 0) {
+            uint8_t buf[256];
+            int len = ws_recv_frame(sock, buf, sizeof(buf) - 1);
+            if (len > 0) {
+                buf[len] = 0;
+                if (strstr((const char *) buf, "\"WELCOME\"")) {
+                    ESP_LOGI(TAG, "da dang ki cam bien %d voi server %s:%d", CONFIG_WS_SENSOR_ID,
+                             CONFIG_WS_SERVER_HOST, CONFIG_WS_SERVER_TCP_PORT);
+                    xTaskCreate(recv_task, "recv", 3072, (void *) (intptr_t) sock, 5, NULL);
+                    return sock;
+                }
+                ESP_LOGE(TAG, "server tu choi: %s", (const char *) buf);   // ví dụ DUPLICATE_SENSOR
+            }
+        }
+        if (sock >= 0) close(sock);
+        ESP_LOGW(TAG, "chua ket noi duoc server TCP %s:%d, thu lai sau 2 giay", CONFIG_WS_SERVER_HOST,
+                 CONFIG_WS_SERVER_TCP_PORT);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+}
+#endif
+
 static void send_task(void *arg) {
+#if CONFIG_WS_TRANSPORT_TCP
+    int sock = tcp_register();
+#else
     struct sockaddr_in dest;
     int sock = ws_udp_open_retry(CONFIG_WS_SERVER_HOST, CONFIG_WS_SERVER_PORT, &dest);
+#endif
     uint8_t pkt[WS_MAX_PACKET];
     csi_item_t item;
     bool logged_len = false;
@@ -112,8 +222,20 @@ static void send_task(void *arg) {
             }
             size_t len = ws_build_packet(pkt, CONFIG_WS_SENSOR_ID, item.seq, item.ts_us,
                                          item.rssi, item.buf, item.len / 2);
+#if CONFIG_WS_TRANSPORT_TCP
+            if (send_frame_locked(sock, pkt, len) != 0) {
+                send_errors++;
+                ESP_LOGW(TAG, "mat ket noi server, noi lai");
+                shutdown(sock, SHUT_RDWR);           // làm recv_task của kết nối cũ thoát
+                close(sock);
+                sock = tcp_register();               // khung đến trong lúc nối lại bị bỏ ở hàng đợi (s_dropped)
+            } else {
+                sent++;
+            }
+#else
             if (sendto(sock, pkt, len, 0, (struct sockaddr *) &dest, sizeof(dest)) < 0) send_errors++;
             else sent++;
+#endif
             last_rssi = item.rssi;
         }
         int64_t now = esp_timer_get_time();
@@ -130,26 +252,6 @@ static void send_task(void *arg) {
         }
     }
 }
-
-#if CONFIG_WS_SOURCE_ROUTER
-// Tạo lưu lượng đều để router trả lời liên tục, mỗi gói trả lời cho một khung CSI (như csi_recv_router)
-static void ping_gateway_start(void) {
-    esp_netif_ip_info_t ip;
-    esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), &ip);
-    esp_ping_config_t pc = ESP_PING_DEFAULT_CONFIG();
-    pc.count = ESP_PING_COUNT_INFINITE;
-    pc.interval_ms = 1000 / CONFIG_WS_PING_HZ;
-    pc.task_stack_size = 3072;
-    pc.data_size = 1;
-    pc.target_addr.u_addr.ip4.addr = ip4_addr_get_u32(&ip.gw);
-    pc.target_addr.type = ESP_IPADDR_TYPE_V4;
-    esp_ping_callbacks_t cbs = {0};
-    esp_ping_handle_t handle;
-    ESP_ERROR_CHECK(esp_ping_new_session(&pc, &cbs, &handle));
-    ESP_ERROR_CHECK(esp_ping_start(handle));
-    ESP_LOGI(TAG, "ping gateway " IPSTR " %d lan/giay", IP2STR(&ip.gw), CONFIG_WS_PING_HZ);
-}
-#endif
 
 void app_main(void) {
     s_queue = xQueueCreate(32, sizeof(csi_item_t));
@@ -188,10 +290,17 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_wifi_set_csi_config(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(csi_cb, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));
+#if CONFIG_WS_TRANSPORT_TCP
+    s_tx_lock = xSemaphoreCreateMutex();
+#endif
     // Wi-Fi chạy ở lõi 0; đặt task gửi ở lõi còn lại nếu chip có 2 lõi
     xTaskCreatePinnedToCore(send_task, "send", 4096, NULL, 5, NULL, portNUM_PROCESSORS > 1 ? 1 : 0);
 #if CONFIG_WS_SOURCE_ROUTER
-    ping_gateway_start();
+    ping_gateway_set_hz(CONFIG_WS_PING_HZ);
 #endif
-    ESP_LOGI(TAG, "dang gui CSI toi %s:%d", CONFIG_WS_SERVER_HOST, CONFIG_WS_SERVER_PORT);
+#if CONFIG_WS_TRANSPORT_TCP
+    ESP_LOGI(TAG, "gui CSI qua TCP toi %s:%d (client cam bien)", CONFIG_WS_SERVER_HOST, CONFIG_WS_SERVER_TCP_PORT);
+#else
+    ESP_LOGI(TAG, "gui CSI qua UDP toi %s:%d (du phong)", CONFIG_WS_SERVER_HOST, CONFIG_WS_SERVER_PORT);
+#endif
 }

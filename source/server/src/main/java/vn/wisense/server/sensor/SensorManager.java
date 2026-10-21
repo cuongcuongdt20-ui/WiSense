@@ -49,18 +49,20 @@ public final class SensorManager implements AutoCloseable {
     public void configure(int sensorId, String key, double value) {
         if (!sensors.containsKey(sensorId)) throw new IllegalArgumentException("Unknown sensor: " + sensorId);
         boolean supported = false;
-        IllegalArgumentException lastError = null;
+        IllegalArgumentException validationError = null;
         for (Detector detector : detectors) {
             try {
                 detector.configure(key, value);
                 supported = true;
             } catch (IllegalArgumentException e) {
-                // Detectors may support different keys; preserve the last validation error if none accepts it.
-                lastError = e;
+                // Detector không có khoá này báo "Unsupported ..."; lỗi khác là detector có khoá nhưng giá trị sai,
+                // giữ lại lỗi đó để client biết đúng nguyên nhân.
+                String msg = e.getMessage();
+                if (msg == null || !msg.startsWith("Unsupported")) validationError = e;
             }
         }
         if (!supported) {
-            if (lastError != null) throw lastError;
+            if (validationError != null) throw validationError;
             throw new IllegalArgumentException("Unknown configuration key: " + key);
         }
     }

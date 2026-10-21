@@ -1,4 +1,5 @@
 #include <string.h>
+#include <unistd.h>
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -52,9 +53,10 @@ void ws_wifi_connect(const char *ssid, const char *pass) {
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL);
 
+    // SSID/mật khẩu được dài đủ 32/64 byte và không cần ký tự kết thúc; phần thừa đã là 0 nhờ {0}
     wifi_config_t wc = {0};
-    strncpy((char *) wc.sta.ssid, ssid, sizeof(wc.sta.ssid));
-    strncpy((char *) wc.sta.password, pass, sizeof(wc.sta.password));
+    memcpy(wc.sta.ssid, ssid, strnlen(ssid, sizeof(wc.sta.ssid)));
+    memcpy(wc.sta.password, pass, strnlen(pass, sizeof(wc.sta.password)));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -87,6 +89,60 @@ int ws_udp_open_retry(const char *host, uint16_t port, struct sockaddr_in *dest)
         ESP_LOGW(TAG, "khong mo duoc UDP toi %s:%u, thu lai sau 1 giay", host, port);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
+}
+
+int ws_tcp_connect(const char *host, uint16_t port) {
+    struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host, NULL, &hints, &res) != 0 || res == NULL) return -1;
+    struct sockaddr_in dest = *(struct sockaddr_in *) res->ai_addr;
+    dest.sin_port = htons(port);
+    freeaddrinfo(res);
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock < 0) return -1;
+    if (connect(sock, (struct sockaddr *) &dest, sizeof(dest)) != 0) {
+        close(sock);
+        return -1;
+    }
+    int one = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));   // khung CSI nhỏ, gửi ngay không gom
+    return sock;
+}
+
+// send/recv trên TCP có thể chỉ xong một phần: lặp tới khi đủ
+static int send_all(int sock, const uint8_t *p, size_t n) {
+    while (n > 0) {
+        int w = send(sock, p, n, 0);
+        if (w <= 0) return -1;
+        p += w;
+        n -= (size_t) w;
+    }
+    return 0;
+}
+
+static int recv_all(int sock, uint8_t *p, size_t n) {
+    while (n > 0) {
+        int r = recv(sock, p, n, 0);
+        if (r <= 0) return -1;                    // 0 = server đóng kết nối
+        p += r;
+        n -= (size_t) r;
+    }
+    return 0;
+}
+
+int ws_send_frame(int sock, const void *data, size_t len) {
+    uint8_t head[4] = {(uint8_t) (len >> 24), (uint8_t) (len >> 16), (uint8_t) (len >> 8), (uint8_t) len};
+    if (send_all(sock, head, 4) != 0) return -1;
+    return send_all(sock, (const uint8_t *) data, len);
+}
+
+int ws_recv_frame(int sock, uint8_t *buf, size_t cap) {
+    uint8_t head[4];
+    if (recv_all(sock, head, 4) != 0) return -1;
+    uint32_t len = ((uint32_t) head[0] << 24) | ((uint32_t) head[1] << 16) | ((uint32_t) head[2] << 8) | head[3];
+    if (len == 0 || len > cap) return -1;        // khung quá dài: luồng byte không còn tin được, đóng kết nối
+    if (recv_all(sock, buf, len) != 0) return -1;
+    return (int) len;
 }
 
 // ESP32 là little-endian nên tự ghi từng byte theo big-endian

@@ -22,6 +22,16 @@ int ws_udp_open(const char *host, uint16_t port, struct sockaddr_in *dest);
 // Như ws_udp_open nhưng thử lại mỗi giây cho tới khi được (server/DNS chưa sẵn sàng lúc khởi động)
 int ws_udp_open_retry(const char *host, uint16_t port, struct sockaddr_in *dest);
 
+// Kết nối TCP tới server (tắt Nagle để gói nhỏ đi ngay); trả về socket hoặc -1 nếu lỗi
+int ws_tcp_connect(const char *host, uint16_t port);
+
+// Gửi một khung: 4 byte độ dài (big-endian) rồi nội dung, gửi lặp tới khi đủ. 0 = thành công, -1 = lỗi.
+// Nhiều task cùng gửi trên một socket thì bên gọi phải khoá.
+int ws_send_frame(int sock, const void *data, size_t len);
+
+// Nhận một khung vào buf (tối đa cap byte). Trả về độ dài, hoặc -1 nếu lỗi/khung quá dài/server đóng.
+int ws_recv_frame(int sock, uint8_t *buf, size_t cap);
+
 // Đóng gói theo hợp đồng chung:
 // "CSI1" (4) | sensorId (1) | seq (4) | timestampUs (8) | rssi (1) | n (2) | n × [imag (1) | real (1)]
 // csi: n cặp [imag, real] liên tiếp, đúng thứ tự buf của esp_wifi

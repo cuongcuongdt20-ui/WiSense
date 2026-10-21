@@ -8,8 +8,26 @@ menu "WiSense"
     config WS_SERVER_HOST
         string "Server IP"
         default "192.168.1.10"
+    choice WS_TRANSPORT
+        prompt "Giao thuc gui du lieu cam bien"
+        default WS_TRANSPORT_TCP
+        help
+            TCP: ESP32 la client cam bien cua server (HELLO role=sensor, nhan lenh CONFIG doi tan so ping).
+            UDP: kenh du phong nhu ban cu, chi gui mot chieu.
+        config WS_TRANSPORT_TCP
+            bool "TCP (client cam bien)"
+        config WS_TRANSPORT_UDP
+            bool "UDP (du phong)"
+    endchoice
+
+    config WS_SERVER_TCP_PORT
+        int "Server TCP port"
+        depends on WS_TRANSPORT_TCP
+        default 7000
+
     config WS_SERVER_PORT
         int "Server UDP port"
+        depends on WS_TRANSPORT_UDP
         default 5005
     config WS_SENSOR_ID
         int "Sensor id"

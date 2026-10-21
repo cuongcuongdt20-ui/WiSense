@@ -4,7 +4,9 @@ import java.net.InetAddress;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import javafx.animation.AnimationTimer;
 import javafx.geometry.Insets;
@@ -15,6 +17,7 @@ import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListView;
 import javafx.scene.control.TextField;
+import javafx.scene.control.TextInputDialog;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.paint.Color;
@@ -35,14 +38,18 @@ public class MainView {
     private final Label connLabel = new Label("Chưa kết nối");
     private final ComboBox<Integer> sensorBox = new ComboBox<>();
     private final Button historyButton = new Button("Lịch sử");
+    private final Button rateButton = new Button("Tần số");
+    private final Label sensorState = new Label();
     private final Label statsLabel = new Label("—");
     private final Label errorLabel = new Label();
     private final SignalChart chart = new SignalChart();
     private final StatusPanel status = new StatusPanel();
     private final String clientName = defaultName();
+    private final Set<Integer> online = new HashSet<>();    // chỉ luồng JavaFX dùng
     private volatile boolean connected;
     private ServerConnection conn;
     private int shown = 1;                                  // sensor đang hiển thị
+    private long nextReq = 1;                               // mã yêu cầu cho lệnh SET_SENSOR
     private long errorUntilMs;
     private FallAlertHandler fallHandler = f -> System.out.println("FALL " + f);  // TV4 thay bằng bản thật
 
@@ -55,8 +62,10 @@ public class MainView {
         sensorBox.setOnAction(e -> selectSensor(sensorBox.getValue()));
         historyButton.setDisable(true);
         historyButton.setOnAction(e -> conn.request(Msg.getHistory(shown, HISTORY_LIMIT)));
+        rateButton.setDisable(true);
+        rateButton.setOnAction(e -> askSampleRate());
         HBox top = new HBox(8, new Label("Server"), hostField, new Label("Cổng"), portField, connect, connLabel,
-                new Label("Cảm biến"), sensorBox, historyButton);
+                new Label("Cảm biến"), sensorBox, sensorState, historyButton, rateButton);
         top.setPadding(new Insets(8));
         errorLabel.setTextFill(Color.CRIMSON);
         HBox bottom = new HBox(16, statsLabel, errorLabel);
@@ -98,6 +107,7 @@ public class MainView {
             conn.setSensors(List.of(shown));                // chưa nối nên chỉ ghi nhớ, gửi khi có WELCOME
             conn.start();
             historyButton.setDisable(false);
+            rateButton.setDisable(false);
         } catch (NumberFormatException e) {
             connLabel.setText("Cổng không hợp lệ");
         }
@@ -109,7 +119,29 @@ public class MainView {
         chart.clear();
         status.setSensor(s);
         statsLabel.setText("—");
+        showSensorState();
         if (conn != null) conn.setSensors(List.of(s));
+    }
+
+    /** Hỏi tần số lấy mẫu mới rồi gửi SET_SENSOR; server chuyển xuống cảm biến, OK hoặc ERROR trả về sau. */
+    private void askSampleRate() {
+        TextInputDialog dialog = new TextInputDialog("100");
+        dialog.setTitle("Đổi tần số lấy mẫu");
+        dialog.setHeaderText("Cảm biến " + shown + ": số lần ping router mỗi giây");
+        dialog.setContentText("Từ 1 đến 200:");
+        dialog.showAndWait().ifPresent(text -> {
+            try {
+                conn.request(Msg.setSensor(nextReq++, shown, Integer.parseInt(text.trim())));
+            } catch (NumberFormatException e) {
+                showError("Tần số phải là số nguyên");
+            }
+        });
+    }
+
+    private void showSensorState() {
+        boolean on = online.contains(shown);
+        sensorState.setText(on ? "● online" : "○ offline");
+        sensorState.setTextFill(on ? Color.SEAGREEN : Color.GRAY);
     }
 
     private void drain() {
@@ -123,10 +155,17 @@ public class MainView {
                 case Message.Stats st when st.sensor() == shown -> statsLabel.setText(
                         String.format("Cảm biến %d · %d gói/giây · mất %.1f%%", st.sensor(), st.pps(), st.loss() * 100));
                 case Message.Fall f -> fallHandler.onFall(f);           // té ngã ở sensor nào cũng báo
-                case Message.Welcome w -> showSensors(w.sensors());
+                case Message.Welcome w -> {
+                    online.clear();
+                    online.addAll(w.online());
+                    showSensors(w.sensors());
+                    showSensorState();
+                }
+                case Message.SensorStatus st -> onSensorStatus(st);
                 case Message.History h -> showHistory(h);
+                case Message.Ok ok when Msg.SET_SENSOR.equals(ok.re()) -> showNotice("Cảm biến đã áp dụng tần số mới");
                 case Message.ServerError err -> showError(err.code() + ": " + err.msg());
-                default -> { }                              // PING, OK, tin của sensor khác
+                default -> { }                              // PING, OK khác, tin của sensor khác
             }
         }
         if (errorUntilMs > 0 && System.currentTimeMillis() > errorUntilMs) {
@@ -146,7 +185,27 @@ public class MainView {
         }
     }
 
+    /** Cảm biến online/offline: cập nhật danh sách, báo nếu là cảm biến đang xem. */
+    private void onSensorStatus(Message.SensorStatus st) {
+        if (st.online()) online.add(st.sensor()); else online.remove(st.sensor());
+        if (!sensorBox.getItems().contains(st.sensor())) {
+            sensorBox.getItems().add(st.sensor());           // cảm biến mới xuất hiện sau khi đã kết nối
+            sensorBox.setDisable(false);
+        }
+        if (st.sensor() == shown) {
+            showSensorState();
+            if (!st.online()) showError("Cảm biến " + st.sensor() + " mất kết nối");
+        }
+    }
+
     private void showError(String text) {
+        errorLabel.setTextFill(Color.CRIMSON);
+        errorLabel.setText(text);
+        errorUntilMs = System.currentTimeMillis() + 5000;
+    }
+
+    private void showNotice(String text) {
+        errorLabel.setTextFill(Color.SEAGREEN);
         errorLabel.setText(text);
         errorUntilMs = System.currentTimeMillis() + 5000;
     }

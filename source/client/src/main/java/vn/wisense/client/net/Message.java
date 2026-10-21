@@ -29,22 +29,37 @@ public sealed interface Message {
         }
     }
 
-    /** Trả lời HELLO: số phiên và danh sách sensor đang có dữ liệu. */
-    record Welcome(int session, List<Integer> sensors) implements Message {
+    /** Trả lời HELLO: số phiên, mọi sensor server từng thấy, và các sensor đang online. */
+    record Welcome(int session, List<Integer> sensors, List<Integer> online) implements Message {
+        public Welcome(int session, List<Integer> sensors) {
+            this(session, sensors, List.of());
+        }
+
         public int sensor() {
             return 0;
         }
     }
 
-    /** Lệnh re đã được server chấp nhận. */
-    record Ok(String re) implements Message {
+    /** Cảm biến vừa online hoặc offline (server đẩy cho mọi client giám sát). */
+    record SensorStatus(int sensor, boolean online) implements Message {}
+
+    /** Lệnh re đã được server chấp nhận; req = mã yêu cầu của lệnh đó (-1 nếu lệnh không gửi req). */
+    record Ok(String re, long req) implements Message {
+        public Ok(String re) {
+            this(re, -1);
+        }
+
         public int sensor() {
             return 0;
         }
     }
 
-    /** Server từ chối lệnh, hoặc client không gửi được lệnh (code NOT_CONNECTED). */
-    record ServerError(String code, String msg) implements Message {
+    /** Server từ chối lệnh, hoặc client không gửi được lệnh (code NOT_CONNECTED); req như {@link Ok}. */
+    record ServerError(String code, String msg, long req) implements Message {
+        public ServerError(String code, String msg) {
+            this(code, msg, -1);
+        }
+
         public int sensor() {
             return 0;
         }
@@ -67,10 +82,12 @@ public sealed interface Message {
             case "STATS" -> new Stats(sensor(o), o.get("pps").getAsInt(), o.get("loss").getAsDouble());
             case "SIGNAL" -> new Signal(sensor(o), floats(o.getAsJsonArray("amp")));
             case Msg.PING -> new Ping();
-            case Msg.WELCOME -> new Welcome(o.get("session").getAsInt(), ints(o.getAsJsonArray("sensors")));
-            case Msg.OK -> new Ok(o.get("re").getAsString());
+            case Msg.WELCOME -> new Welcome(o.get("session").getAsInt(), ints(o.getAsJsonArray("sensors")),
+                    o.has("online") ? ints(o.getAsJsonArray("online")) : List.of());
+            case Msg.SENSOR_STATUS -> new SensorStatus(sensor(o), o.get("online").getAsBoolean());
+            case Msg.OK -> new Ok(o.get("re").getAsString(), Msg.req(o));
             case Msg.ERROR -> new ServerError(o.get("code").getAsString(),
-                    o.has("msg") ? o.get("msg").getAsString() : "");
+                    o.has("msg") ? o.get("msg").getAsString() : "", Msg.req(o));
             case Msg.HISTORY -> new History(sensor(o), events(o.getAsJsonArray("events")));
             default -> null;
         };

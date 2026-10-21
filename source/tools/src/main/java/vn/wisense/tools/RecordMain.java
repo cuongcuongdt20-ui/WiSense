@@ -16,6 +16,7 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import vn.wisense.common.protocol.CsiCsv;
 
 /**
  * Ghi gói CSI1 từ ESP32 ra file CSV để phát lại bằng ReplayMain:
@@ -30,9 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class RecordMain {
     private static final int DEFAULT_PORT = 5005;
-    private static final int HEADER_BYTES = 20;
     private static final int MAX_PACKET = 65_507;
-    private static final byte[] MAGIC = {'C', 'S', 'I', '1'};
 
     private RecordMain() {}
 
@@ -127,30 +126,11 @@ public final class RecordMain {
 
     /** Đổi một gói CSI1 thành dòng CSV; gói sai định dạng thì ném IllegalArgumentException. */
     static String toCsvRow(byte[] p, int length) {
-        if (length < HEADER_BYTES) throw new IllegalArgumentException("Goi qua ngan: " + length);
-        for (int i = 0; i < MAGIC.length; i++) {
-            if (p[i] != MAGIC[i]) throw new IllegalArgumentException("Sai chu ky, khong phai CSI1");
-        }
-        ByteBuffer b = ByteBuffer.wrap(p, 0, length).order(ByteOrder.BIG_ENDIAN);
-        b.position(4);
-        int sensor = Byte.toUnsignedInt(b.get());
-        long seq = Integer.toUnsignedLong(b.getInt());
-        long ts = b.getLong();
-        int rssi = b.get();
-        int n = Short.toUnsignedInt(b.getShort());
-        if (n < 1 || length != HEADER_BYTES + 2 * n) {
-            throw new IllegalArgumentException("Do dai goi khong khop so song mang con: n=" + n + ", length=" + length);
-        }
-        StringBuilder sb = new StringBuilder(32 + 8 * n);
-        sb.append(sensor).append(',').append(seq).append(',').append(ts).append(',').append(rssi);
-        for (int i = 0; i < 2 * n; i++) sb.append(',').append((int) b.get());   // byte có dấu
-        return sb.toString();
+        return CsiCsv.toRow(p, length);
     }
 
     private static String header(int n) {
-        StringBuilder sb = new StringBuilder("sensorId,seq,timestampUs,rssi");
-        for (int k = 0; k < n; k++) sb.append(",imag").append(k).append(",real").append(k);
-        return sb.append('\n').toString();
+        return CsiCsv.header(n);
     }
 
     private static InetSocketAddress parseHostPort(String s) {
